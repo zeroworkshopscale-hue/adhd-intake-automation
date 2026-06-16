@@ -1,0 +1,122 @@
+# ============================================================================
+# ADHD Intake Automation -- configuration template
+#
+# Copy this file to config.yaml and fill in the values marked REPLACE_ME.
+# config.yaml is git-ignored (it may contain your EMR URL, sheet IDs, paths).
+# ============================================================================
+
+# --- Working folders (created automatically) --------------------------------
+folders:
+  incoming:  "./data/incoming"
+  processed: "./data/processed"
+  rejected:  "./data/rejected"
+
+# --- Database & logs (created automatically) --------------------------------
+database:
+  path: "./data/adhd_intake.db"
+
+logging:
+  dir:   "./logs"
+  level: "INFO"    # DEBUG | INFO | WARNING | ERROR
+
+# --- OCR (only needed for scanned / handwritten PDFs) -----------------------
+ocr:
+  # Windows default install location for Tesseract-OCR.
+  # Download from: https://github.com/UB-Mannheim/tesseract/wiki
+  tesseract_cmd: "C:/Program Files/Tesseract-OCR/tesseract.exe"
+  language:    "eng"
+  render_dpi:  300
+
+# --- Signature / consent validation -----------------------------------------
+validation:
+  # Fraction of dark pixels in the signature region that counts as signed.
+  # A missing signature does NOT block processing -- the form is still uploaded
+  # and the status is set to Completed - Signature Missing on Consent Form.
+  # Calibrate with: python tools/calibrate_signature.py --signed a.pdf --unsigned b.pdf
+  min_ink_density: 0.05
+  consent_keywords:
+    - "consent"
+    - "signature"
+    - "i agree"
+    - "declaration"
+
+  # Response-completeness check on questionnaire pages (Adult: 6-11, Women: 6-12).
+  # Every question row must carry at least one mark. Set false to disable.
+  check_completeness: true
+  response_min_ink:    0.012
+  response_rel_margin: 0.010
+
+# --- OSCAR Pro / KAI EMR ----------------------------------------------------
+oscar:
+  # Your KAI EMR base URL (the path prefix before /Login, /PatientSearch, etc.)
+  base_url: "https://welcome.kai-oscar.com/oscar"   # REPLACE_ME if different
+  # true = browser runs hidden; false = visible (recommended for first few runs)
+  headless: true
+  # chrome = your installed Google Chrome (recommended, no download needed)
+  # chromium = Playwright bundled browser (auto-downloaded if missing)
+  browser_channel: "chrome"
+  timeout_ms: 30000
+  # Document type shown in the OSCAR eDoc Type dropdown.
+  document_type: "Form"
+  # Detect and offer chart updates when name / preferred-name differ from the form.
+  update_chart: true
+  # username and password are intentionally omitted -- the app prompts at startup.
+
+# --- Clinic identity (addresses / emails to ignore as clinic-owned) ---------
+clinic:
+  email: "ADHD@adultadhdcentre.com"   # REPLACE_ME
+  address_markers:
+    - "7885 6th Street"               # REPLACE_ME with your clinic address markers
+    - "Unit #202"
+    - "V3N 3N4"
+
+# --- Program (MSP vs Private) -----------------------------------------------
+# Column A is populated from the patient OSCAR Booking Alert.
+# If the alert text contains any keyword below (case-insensitive), column A = private_label.
+program:
+  private_keywords:
+    - "private"
+    - "therapist supported"
+  private_label: "Private"
+  default_label: ""
+
+# --- Copy-sheet / Google Sheets ---------------------------------------------
+sheets:
+  # local  -> keeps a local CSV you paste into your master Google Sheet
+  # google -> writes straight to Google Sheets (PHI-safe, no names)
+  # both   -> does both
+  mode: "local"
+  local_path: "./data/intake_master_copy.csv"
+  # Wipe the local CSV on each new session (recommended: true).
+  reset_each_session: true
+
+  # Column order must match your master Google Sheet so rows paste in aligned.
+  # field options: blank, date, datetime, demographic_no, email, first_name,
+  #   last_name, full_name, dob, age, phone, health_card, pronoun,
+  #   questionnaire_type, signature, status, oscar_document_id, source_filename,
+  #   program_status, province
+  # Use form:<PDF field name> to pull a raw questionnaire answer.
+  columns:
+    - {header: "MSP/ Private3",           field: program_status}
+    - {header: "Date",                    field: date}
+    - {header: "Demographic number",      field: demographic_no}
+    - {header: "Email Address",           field: email}
+    - {header: "Pronoun",                 field: "form:pronoun"}
+    - {header: "Age",                     field: age}
+    - {header: "Student - list program",  field: "form:Current Program"}
+    - {header: "List Employment",         field: "form:Current Occupation|PartTime FullTimeCurrent Occupation"}
+    - {header: "Substance Use?",          field: "form:substance_use"}
+    - {header: "",                        field: blank}
+    - {header: "",                        field: blank}
+    - {header: "",                        field: blank}
+    - {header: "How did they hear about us?", field: blank}
+    - {header: "",                        field: blank}
+    - {header: "Coach/Doctor/Counsellor Name", field: "form:Doctor (name):|Counsellor (name):|Coach (name):"}
+    - {header: "Future initiatives?",     field: "form:future_initiatives"}
+    - {header: "Future research?",        field: "form:future_research"}
+    - {header: "Province",                field: province}
+
+  # Only needed when mode is google or both:
+  service_account_file: "./secrets/google_service_account.json"
+  spreadsheet_id:       "REPLACE_WITH_YOUR_SPREADSHEET_ID"
+  worksheet_name:       "Intake Log"

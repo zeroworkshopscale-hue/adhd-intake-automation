@@ -1,0 +1,76 @@
+# ===========================================================================
+# ADHD Intake Automation - .gitignore
+# ===========================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.Python
+pip-log.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+*.cover
+htmlcov/
+.pytest_cache/
+
+# App data & PHI - NEVER commit patient data or credentials
+config.yaml
+data/
+logs/
+incoming/
+processed/
+rejected/
+secrets/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+*.sqlite
+google_service_account.json
+oscar_credentials.json
+*.pem
+*.key
+*.p12
+
+# Build artefacts
+build/
+dist/
+*.spec.lock
+
+# Environment / dotenv
+.env
+.env.*
+!.env.example
+
+# Playwright browser cache
+playwright/.local-browsers/
+*/.local-browsers/
+ms-playwright/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Third-party agent tooling
+ruflo/

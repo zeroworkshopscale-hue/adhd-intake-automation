@@ -1,0 +1,61 @@
+==========================================================
+  ADHD Intake Automation  —  How to start
+==========================================================
+
+TO OPEN THE APP
+---------------
+Double-click either of these:
+  * "ADHD Intake Automation" shortcut on your Desktop, OR
+  * "Launch ADHD Intake.bat" inside this folder.
+
+The app will:
+  1. Ask for your OSCAR username and password (so uploads go under
+     YOUR provider profile). Type them in and click "Sign in".
+  2. Open the dashboard. Drag questionnaire PDFs from Outlook (or your
+     files) onto the big drop area. You can also click it to browse.
+
+Processed patients show up in the table at the bottom with their
+Demographic Number, Name, and Email.
+
+
+YOUR PATIENT SHEET
+------------------
+By default the app keeps its OWN spreadsheet for you at:
+    data\intake_master_copy.csv
+Click the "Open copy sheet" button in the app to open it, then copy the
+rows in one go into your master Google Sheet (same column order).
+(If you'd rather the app write straight into a Google Sheet instead, see
+the README - set sheets.mode to "google".)
+
+
+BEFORE THE FIRST REAL UPLOAD  (one-time setup)
+----------------------------------------------
+The OSCAR address is already set to your KAI EMR
+(https://welcome.kai-oscar.com/kaiemr). You do NOT put your OSCAR
+password in any file - the app asks for it each time it starts.
+
+For scanned / handwritten forms, also install "Tesseract-OCR for
+Windows" (free). Typed/fillable PDFs work without it.
+
+Tune the signature check to YOUR forms once: take one signed and one
+blank consent PDF and run, in this folder:
+    python tools\calibrate_signature.py --signed signed.pdf --unsigned blank.pdf
+then put the number it recommends into config.yaml (validation:
+min_ink_density). This stops real signatures being rejected by mistake.
+
+
+WHAT HAPPENS TO EACH FILE
+-------------------------
+  * If the consent page is NOT signed  -> the file is rejected and moved
+    to the "data\rejected" folder. Nothing is uploaded. The app then pops
+    up a ready-to-send reminder email - click "Copy email text", paste it
+    into Outlook, and send it to the patient.
+  * If the patient is NOT found in OSCAR -> it stops and is marked
+    "Patient Not Found". Nothing is uploaded.
+  * Otherwise -> it is uploaded to OSCAR Documents (Type = Form,
+    Description = "ADHD Assessment Tool"), added to your copy sheet, and
+    moved to "data\processed".
+
+Everything is recorded locally in a database with a full audit trail.
+Logs are in the "logs" folder if anything goes wrong.
+==========================================================

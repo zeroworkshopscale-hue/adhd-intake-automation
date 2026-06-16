@@ -1,0 +1,28 @@
+# ===== ADHD Intake Automation - Python dependencies =====
+
+# --- GUI ---
+PySide6>=6.6,<6.10
+
+# --- PDF parsing & rendering ---
+pypdf>=4.2               # AcroForm field detection, text extraction
+PyMuPDF>=1.24            # fast text/image extraction & page rendering (fitz)
+pdfplumber>=0.11         # table/word geometry extraction
+
+# --- OCR ---
+pytesseract>=0.3.10      # Tesseract wrapper (requires Tesseract-OCR installed)
+Pillow>=10.3             # image handling for OCR & signature analysis
+numpy>=1.26              # ink-density analysis for signature detection
+
+# --- Browser automation (OSCAR Pro) ---
+playwright>=1.44
+
+# --- Google Sheets ---
+gspread>=6.1
+google-auth>=2.30
+
+# --- Config / utility ---
+PyYAML>=6.0
+python-dateutil>=2.9
+
+# --- Packaging (optional, for building the .exe) ---
+# pyinstaller>=6.6
