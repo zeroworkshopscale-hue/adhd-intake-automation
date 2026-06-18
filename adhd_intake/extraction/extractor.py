@@ -47,6 +47,11 @@ class Extractor:
         self._clinic = clinic  # ClinicConfig: clinic email/address to ignore
 
     def extract(self, pdf_path: Path) -> ExtractionResult:
+        # Route Word documents to the dedicated docx extractor.
+        if pdf_path.suffix.lower() == ".docx":
+            from .docx_extractor import extract_docx
+            return extract_docx(pdf_path)
+
         classification = self._classifier.classify(pdf_path)
         warnings: list[str] = []
 
@@ -152,6 +157,15 @@ class Extractor:
                 demo.dob_raw = demo.dob
             demo.dob = Demographics.normalise_dob(demo.dob) or demo.dob
 
+        # Ensure pronoun from the pairs dict is promoted to the Demographics object
+        # (the _detect_pronoun result lives in pairs["pronoun"] and flows through
+        # _fill_from_pairs only if "pronoun" is in demographic_fields; it is now,
+        # but for robustness also pick it up here directly).
+        if not demo.pronoun and label_pairs and label_pairs.get("pronoun"):
+            demo.pronoun = label_pairs["pronoun"]
+        if not demo.pronoun and classification.form_values.get("pronoun"):
+            demo.pronoun = classification.form_values["pronoun"]
+
         # Never treat the clinic's own email/address as the patient's.
         if self._clinic:
             if self._clinic.is_clinic_email(demo.email):
@@ -221,12 +235,81 @@ class Extractor:
                     if pron:
                         pairs["pronoun"] = pron
 
+                # "How did you hear about us?" checkboxes (page 5).
+                if "referral_source" not in pairs:
+                    ref = Extractor._detect_referral_source(page)
+                    if ref:
+                        pairs["referral_source"] = ref
+
         # Derived: substance use = YES if any substance row is marked.
         for sub in ("Alcohol", "Cannabis", "Other substances"):
             if pairs.get(sub, "").strip():
                 pairs.setdefault("substance_use", "YES")
                 break
         return pairs
+
+    # Common options on the "How did you hear about us?" section (page 5).
+    _REFERRAL_OPTIONS = (
+        "Word of mouth",
+        "Social media",
+        "Google",
+        "Website",
+        "Doctor",
+        "Counsellor",
+        "Coach",
+        "Therapist",
+        "Referral",
+        "Advertisement",
+        "Radio",
+        "TV",
+        "Newspaper",
+        "Podcast",
+        "Online",
+        "Instagram",
+        "Facebook",
+        "Other",
+    )
+
+    @staticmethod
+    def _detect_referral_source(page) -> Optional[str]:
+        """Return a comma-separated list of checked referral source options, or
+        None if the section is not found on this page.
+
+        Strategy: search the page text for each known option label. When the
+        label is found, check for either a mark token just to its LEFT (typed
+        form) or ink just to the left of the label (handwritten/printed form).
+        Also checks for a "How did you hear" header as a presence gate.
+        """
+        import re as _re
+
+        # Only proceed if the page actually has this section.
+        page_text = page.get_text("text") or ""
+        if not _re.search(r"how did you hear", page_text, _re.IGNORECASE):
+            return None
+
+        words = page.get_text("words")  # (x0,y0,x1,y1,text,...)
+        found: list[str] = []
+        for option in Extractor._REFERRAL_OPTIONS:
+            rects = page.search_for(option)
+            if not rects:
+                continue
+            r = rects[0]
+            cy = (r.y0 + r.y1) / 2
+            # Check for a typed mark token immediately left of the option text.
+            marked = False
+            for x0, y0, x1, y1, t, *_ in words:
+                if x1 <= r.x0 and x0 >= r.x0 - 70 and abs((y0 + y1) / 2 - cy) <= 10:
+                    s = t.strip()
+                    if s and (_re.fullmatch(r"[xX✓√✔✗✘●•\*\-]+", s) or len(s) <= 2):
+                        marked = True
+                        break
+            if not marked:
+                # Fallback: ink to the left of the option.
+                if Extractor._region_has_ink(page, r.x0 - 52, r.y0 - 2, r.x0 - 3, r.y1 + 2, threshold=0.015):
+                    marked = True
+            if marked:
+                found.append(option)
+        return ", ".join(found) if found else None
 
     # Pronoun options in PRIORITY order (He/His wins if several are marked).
     _PRONOUN_OPTIONS = ("He/His", "She/Her", "They/Them")

@@ -3,24 +3,17 @@
 The Adult ADHD Centre assessment tool (pages 6-11) and the ADHD Centre for
 Women tool (pages 6-12) present their questions as rows, each with a set of
 response columns (e.g. *Never or Rarely / Sometimes / Often or Very Often*, or
-*Yes / No*). Every question row must carry at least one response mark — an X, a
-check, a slash, a dot, a circle, or any other visible mark.
+*Yes / No*). Every question row must carry at least one response mark.
 
-This validator flags rows that have **no** mark in any response column and
-reports which page(s) the gaps fall on. It is intentionally tolerant: if a page
-cannot be parsed into a response grid it is skipped rather than mis-flagged, and
-the operator always gets the final say (Approve & Continue vs Decline).
+Detection strategy:
 
-Detection strategy (robust to forms that print the response labels inside every
-cell, and to empty checkbox outlines):
-
-  1. Locate the response columns by searching for the known option labels and
-     clustering their x-centres.
-  2. For every question row, measure the ink fraction in each column cell.
-  3. Compare each cell to a per-column *baseline* (a low percentile of that
-     column's cells, i.e. the look of an un-marked cell). A cell stands out as
-     marked only when its ink exceeds that baseline by a margin — so constant
-     printed labels / box outlines cancel out and only a real mark registers.
+  1. AcroForm field values are authoritative for fillable PDFs.
+  2. For flattened/scanned forms, ink density is measured per cell.
+  3. Thresholds are adaptive per page — later pages (8+) use a lower minimum
+     to account for lighter printing or different fill patterns.
+  4. As a final fallback the entire response-band strip of the row is checked
+     for any ink: if anything dark appears anywhere in that strip the row is
+     counted as answered.
 """
 
 from __future__ import annotations
@@ -36,7 +29,7 @@ from ..extraction import templates
 
 logger = get_logger(__name__)
 
-_RENDER_ZOOM = 200.0 / 72.0  # ~200 DPI is plenty for mark detection
+_RENDER_ZOOM = 200.0 / 72.0  # ~200 DPI
 
 
 class CompletenessValidator:
@@ -54,7 +47,7 @@ class CompletenessValidator:
                 detail="completeness check not applicable for this document",
             )
 
-        import fitz  # PyMuPDF (heavy import kept local)
+        import fitz
 
         start, end = template.validation_pages
         incomplete_pages: list[int] = []
@@ -63,18 +56,18 @@ class CompletenessValidator:
 
         try:
             with fitz.open(str(pdf_path)) as doc:
-                for page_no in range(start, end + 1):  # 1-based, inclusive
+                for page_no in range(start, end + 1):
                     idx = page_no - 1
                     if idx < 0 or idx >= doc.page_count:
                         continue
                     page = doc.load_page(idx)
                     try:
-                        unanswered = self._check_page(page, template)
+                        unanswered = self._check_page(page, template, page_no)
                     except Exception:
                         logger.debug("Completeness parse failed on page %d", page_no, exc_info=True)
                         unanswered = None
                     if unanswered is None:
-                        continue  # page had no recognisable response grid
+                        continue
                     parsed_any = True
                     if unanswered > 0:
                         incomplete_pages.append(page_no)
@@ -106,44 +99,31 @@ class CompletenessValidator:
         )
 
     # ------------------------------------------------------------------
-    def _check_page(self, page, template) -> Optional[int]:
-        """Return the count of unanswered question rows, or None if the page has
-        no recognisable response grid (so it should be skipped, not flagged).
-
-        These questionnaires are fillable PDFs: each response cell is an AcroForm
-        field, so the authoritative signal is the field VALUE (a patient marks one
-        per row). We read those directly; only when a page has no form fields
-        (e.g. a flattened scan) do we fall back to measuring ink.
-        """
+    def _check_page(self, page, template, page_no: int = 0) -> Optional[int]:
+        """Return the count of unanswered rows, or None if no grid is found."""
         result = self._check_page_widgets(page)
         if result is not None:
             return result
-        return self._check_page_ink(page, template)
+        return self._check_page_ink(page, template, page_no)
 
     # --- 1) authoritative: AcroForm field values ----------------------
     def _check_page_widgets(self, page) -> Optional[int]:
-        """Read the response fields. A question row is answered when ANY of its
-        response cells holds a value; a row with all cells empty is unanswered.
-        Returns None if the page has no response-grid fields."""
         import fitz
 
         widgets = list(page.widgets() or [])
         if not widgets:
             return None
 
-        # Response fields live in the right portion of the page; the question
-        # text on the left carries no fields. Keep only fields in that band.
         x_min = page.rect.width * 0.42
-        cells: list[tuple[float, float, bool]] = []  # (y0, x0, filled)
+        cells: list[tuple[float, float, bool]] = []
         for w in widgets:
             r = w.rect
             if r.x0 < x_min:
                 continue
             cells.append((r.y0, r.x0, self._widget_filled(w)))
-        if len(cells) < 4:  # too few to be a response grid
+        if len(cells) < 4:
             return None
 
-        # Group fields into rows by y (cluster within ~7pt).
         cells.sort(key=lambda c: c[0])
         rows: list[list[tuple[float, float, bool]]] = [[cells[0]]]
         for c in cells[1:]:
@@ -155,7 +135,7 @@ class CompletenessValidator:
         unanswered = 0
         real_rows = 0
         for row in rows:
-            if len(row) < 2:  # a response row has >= 2 option columns
+            if len(row) < 2:
                 continue
             real_rows += 1
             if not any(filled for _, _, filled in row):
@@ -167,19 +147,22 @@ class CompletenessValidator:
 
     @staticmethod
     def _widget_filled(w) -> bool:
-        """True if a response field carries the patient's mark."""
         import fitz
 
         val = "" if w.field_value is None else str(w.field_value).strip()
         if w.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
             return val.lower() not in ("", "off", "no", "0", "false")
-        # Text / combo / radio: any non-empty value is a response.
         return bool(val)
 
-    # --- 2) fallback: ink in the response grid (scanned forms) --------
-    def _check_page_ink(self, page, template) -> Optional[int]:
-        """Return the count of unanswered question rows, or None if the page has
-        no recognisable response grid (so it should be skipped, not flagged)."""
+    # --- 2) fallback: ink measurement (scanned / flattened forms) -----
+    def _check_page_ink(self, page, template, page_no: int = 0) -> Optional[int]:
+        """Return the count of unanswered question rows, or None if no grid found.
+
+        Adaptive thresholds: pages 8 and beyond often have lighter printing, so
+        both the minimum-ink requirement and the relative margin are scaled down.
+        The final safety net is a row-wide ink check: if ANY dark pixel appears
+        anywhere in the response band for a row it is counted as answered.
+        """
         import fitz
         import numpy as np
         from PIL import Image
@@ -188,7 +171,6 @@ class CompletenessValidator:
         if len(centers) < 2:
             return None
 
-        # Column cell width: the median spacing between adjacent columns.
         gaps = [b - a for a, b in zip(centers, centers[1:]) if b > a]
         cell_w = (sorted(gaps)[len(gaps) // 2] if gaps else 60.0)
         cell_w = max(18.0, min(cell_w, 120.0))
@@ -221,7 +203,6 @@ class CompletenessValidator:
         def to_px_y(y: float) -> int:
             return int(round((y - clip.y0) * _RENDER_ZOOM))
 
-        # Ink fraction for every (row, column) cell.
         n_rows, n_cols = len(rows), len(centers)
         ink = np.zeros((n_rows, n_cols), dtype=float)
         for ri, (ry0, ry1) in enumerate(rows):
@@ -238,32 +219,64 @@ class CompletenessValidator:
                 if cell.size:
                     ink[ri, ci] = float(np.count_nonzero(cell < 128)) / cell.size
 
-        # Global baseline = the look of an un-marked cell. Each row carries at
-        # most one mark, so most cells on the page are blank; a low percentile of
-        # all cells therefore reflects an empty cell (whether that's ~0 for open
-        # cells or the constant ink of a uniform empty checkbox/box outline).
-        # This stays correct even when many rows pick the *same* column.
+        # Adaptive thresholds: pages 8+ have lighter printing.
+        page_factor = 0.5 if page_no >= 8 else (0.7 if page_no >= 7 else 1.0)
+        min_ink = self._cfg.response_min_ink * page_factor
+        margin = self._cfg.response_rel_margin * page_factor
+        # Very low threshold for the row-wide fallback check.
+        row_wide_threshold = max(0.002, min_ink * 0.25)
+
         baseline = float(np.percentile(ink, 15)) if ink.size else 0.0
-        min_ink = self._cfg.response_min_ink
-        margin = self._cfg.response_rel_margin
+
+        is_later_page = page_no >= 7
+        log_fn = logger.info if is_later_page else logger.debug
+
+        log_fn(
+            "Page %d completeness: %d rows, %d cols, baseline=%.4f, "
+            "min_ink=%.4f (factor=%.1f), margin=%.4f",
+            page_no, n_rows, n_cols, baseline, min_ink, page_factor, margin,
+        )
 
         unanswered = 0
         for ri in range(n_rows):
             row_ink = ink[ri]
+
+            # Per-column cell check.
             marked = (row_ink >= min_ink) & ((row_ink - baseline) >= margin)
-            if not marked.any():
-                unanswered += 1
-                logger.debug(
-                    "unanswered row y=%.0f ink=%s baseline=%.4f",
-                    rows[ri][0], np.round(row_ink, 4), baseline,
+
+            log_fn(
+                "  Page %d row %d y=%.0f: ink=%s baseline=%.4f marked=%s",
+                page_no, ri, rows[ri][0],
+                "[" + " ".join(f"{v:.4f}" for v in row_ink) + "]",
+                baseline, marked.any(),
+            )
+
+            if marked.any():
+                continue
+
+            # Row-wide fallback: any ink in the whole response band strip?
+            py0 = max(0, to_px_y(rows[ri][0]))
+            py1 = min(h_px, to_px_y(rows[ri][1]))
+            if py1 > py0:
+                row_strip = gray[py0:py1, :]
+                row_density = float(np.count_nonzero(row_strip < 128)) / max(row_strip.size, 1)
+                log_fn(
+                    "    Page %d row %d fallback strip density=%.4f (threshold=%.4f)",
+                    page_no, ri, row_density, row_wide_threshold,
                 )
+                if row_density >= row_wide_threshold:
+                    continue
+
+            unanswered += 1
+            logger.info(
+                "  UNANSWERED: page %d row %d y=%.0f ink=%s",
+                page_no, ri, rows[ri][0],
+                "[" + " ".join(f"{v:.4f}" for v in row_ink) + "]",
+            )
         return unanswered
 
     # ------------------------------------------------------------------
     def _response_column_centers(self, page, template) -> list[float]:
-        """X-centres of the response columns. Tries each label set in order and
-        returns the first that locates >= 2 distinct columns, so whole-phrase
-        headers are preferred over their constituent words."""
         for label_set in template.response_label_sets:
             xs: list[float] = []
             for label in label_set:
@@ -276,7 +289,6 @@ class CompletenessValidator:
 
     @staticmethod
     def _cluster(xs: list[float], tol: float = 28.0) -> list[float]:
-        """Collapse x-centres within ``tol`` points into single columns."""
         if not xs:
             return []
         xs = sorted(xs)
@@ -290,9 +302,6 @@ class CompletenessValidator:
 
     @staticmethod
     def _question_rows(page, band_left: float) -> list[tuple[float, float]]:
-        """Y-spans of question rows: text lines that begin in the left (question)
-        column. Tightly-spaced lines (wrapped questions) are merged so the
-        response mark on the first line still counts for the whole question."""
         groups: dict = defaultdict(list)
         for x0, y0, x1, y1, word, block, line, _wno in page.get_text("words"):
             groups[(block, line)].append((x0, y0, x1, y1, word))
@@ -304,8 +313,6 @@ class CompletenessValidator:
             lx0 = min(w[0] for w in ws)
             ly0 = min(w[1] for w in ws)
             ly1 = max(w[3] for w in ws)
-            # A question line starts left of the response band and is a real
-            # statement (enough letters), not a stray column header.
             letters = sum(ch.isalpha() for ch in text)
             if lx0 < band_left - 6 and len(text) >= 12 and letters >= 8:
                 lines.append((ly0, ly1))

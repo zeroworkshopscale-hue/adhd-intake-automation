@@ -63,12 +63,12 @@ class DropZone(QFrame):
         self._stack.setFixedHeight(_ICON_SIZE + 4)
         layout.addWidget(self._stack)
 
-        self._title = QLabel("Drag & drop questionnaire PDFs here")
+        self._title = QLabel("Drag & drop questionnaire files here")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setStyleSheet("color: white; font-size: 17px; font-weight: 800;")
         layout.addWidget(self._title)
 
-        self._subtitle = QLabel("or click to browse your files")
+        self._subtitle = QLabel("or click to browse  (PDF or Word .docx)")
         self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._subtitle.setStyleSheet("color: rgba(255,255,255,0.88); font-size: 13px;")
         layout.addWidget(self._subtitle)
@@ -184,7 +184,7 @@ class DropZone(QFrame):
         paths: list[Path] = []
         for url in mime.urls():
             local = url.toLocalFile()
-            if local.lower().endswith(".pdf") and Path(local).exists():
+            if local.lower().endswith((".pdf", ".docx")) and Path(local).exists():
                 paths.append(Path(local))
         if not paths:
             paths = self._extract_virtual_pdfs(mime)
@@ -222,8 +222,9 @@ class DropZone(QFrame):
     # ---- click-to-browse ------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select questionnaire PDF(s)", "", "PDF files (*.pdf)"
+            self, "Select questionnaire file(s)", "",
+            "Questionnaire files (*.pdf *.docx);;PDF files (*.pdf);;Word documents (*.docx)"
         )
-        paths = [Path(f) for f in files if f.lower().endswith(".pdf")]
+        paths = [Path(f) for f in files if f.lower().endswith((".pdf", ".docx"))]
         if paths:
             self.files_dropped.emit(paths)

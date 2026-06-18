@@ -57,6 +57,7 @@ _COMMON_DEMOGRAPHICS = {
     "phone": ("mobile phone", "phone", "telephone", "mobile", "cell", "contact number"),
     "address": ("address", "home address", "mailing address"),
     "health_card": ("health card", "ohip", "hin", "health number"),
+    "pronoun": ("pronoun", "preferred pronoun", "pronouns", "gender pronoun"),
 }
 
 

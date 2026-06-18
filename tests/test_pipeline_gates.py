@@ -78,7 +78,9 @@ def test_happy_path_uploads_and_logs(config, db, sample_pdf):
     result = processor.process(sample_pdf)
 
     assert result.status is ProcessingStatus.COMPLETED
-    assert oscar.upload_calls == [("456", UPLOAD_DOCUMENT_DESCRIPTION)]
+    assert len(oscar.upload_calls) == 1
+    assert oscar.upload_calls[0][0] == "456"
+    assert oscar.upload_calls[0][2] == UPLOAD_DOCUMENT_DESCRIPTION
     assert UPLOAD_DOCUMENT_DESCRIPTION == "ADHD Assessment Tool"
     assert len(sheets.rows) == 1
     assert result.record.demographic_no == "456"

@@ -76,8 +76,18 @@ class FakeOscar:
         return self.match
 
     def upload_document(self, patient, pdf_path, description):
-        self.upload_calls.append((patient.demographic_no, description))
+        self.upload_calls.append((patient.demographic_no, str(pdf_path), description))
         return f"{patient.demographic_no}:{description}"
+
+    def get_demographic_details(self, demo: str) -> dict:
+        if self.match:
+            return {
+                "last": self.match.last_name,
+                "first": self.match.first_name,
+                "dob": self.match.dob or "",
+                "email": self.match.email or "",
+            }
+        return {}
 
 
 @dataclass

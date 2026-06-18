@@ -106,7 +106,8 @@ class ProcessingStatus(enum.Enum):
     EXTRACTING = "Extracting"
     VALIDATING = "Validating"
     REJECTED_NO_SIGNATURE = "Rejected - No Signature"   # legacy; no longer produced
-    INCOMPLETE_DECLINED = "Incomplete - Returned to Patient"
+    INCOMPLETE_DECLINED = "Incomplete - Returned to Patient"  # legacy; no longer produced
+    INCOMPLETE_PATIENT_INFORMED = "Incomplete Form - Patient Informed"
     PATIENT_NOT_FOUND = "Patient Not Found"
     UPLOADING = "Uploading"
     COMPLETED = "Completed"
@@ -118,6 +119,7 @@ class ProcessingStatus(enum.Enum):
         return self in {
             ProcessingStatus.REJECTED_NO_SIGNATURE,
             ProcessingStatus.INCOMPLETE_DECLINED,
+            ProcessingStatus.INCOMPLETE_PATIENT_INFORMED,
             ProcessingStatus.PATIENT_NOT_FOUND,
             ProcessingStatus.COMPLETED,
             ProcessingStatus.COMPLETED_NO_SIGNATURE,
@@ -129,6 +131,7 @@ class ProcessingStatus(enum.Enum):
         return self in {
             ProcessingStatus.COMPLETED,
             ProcessingStatus.COMPLETED_NO_SIGNATURE,
+            ProcessingStatus.INCOMPLETE_PATIENT_INFORMED,
         }
 
 

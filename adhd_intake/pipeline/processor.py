@@ -49,8 +49,10 @@ if TYPE_CHECKING:  # only needed for type hints; avoids importing PyMuPDF/numpy
 
 logger = get_logger(__name__)
 
-# Description applied to every questionnaire uploaded into OSCAR Documents.
+# Description applied to complete questionnaires uploaded into OSCAR Documents.
 UPLOAD_DOCUMENT_DESCRIPTION = "ADHD Assessment Tool"
+# Description used when the form has unanswered sections but is uploaded anyway.
+UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE = "ADHD Assessment Tool - Incomplete"
 
 
 class _OscarSession(Protocol):
@@ -105,13 +107,6 @@ class IntakeProcessor:
         # the update. Default: never update (no GUI available / headless).
         self.confirm_update: Callable[[ProcessingRecord, list], bool] = (
             confirm_update or (lambda record, discrepancies: False)
-        )
-        # Called when the questionnaire has unanswered rows; returns True to
-        # continue processing (Approve & Continue) or False to stop and return
-        # the form to the patient. Default (headless): continue, since the check
-        # is advisory and there is no operator to decide.
-        self.confirm_incomplete: Callable[[ProcessingRecord, object], bool] = (
-            lambda record, completeness: True
         )
         # Interactive match helpers (set by the GUI worker). Headless -> None,
         # so auto-matching alone is used.
@@ -208,7 +203,8 @@ class IntakeProcessor:
                 record_id=record.id,
             )
 
-        # ---- 2b. Response completeness (advisory gate with operator decision) ----
+        # ---- 2b. Response completeness check (always upload; incomplete = different description) ----
+        _form_incomplete = False
         if self._completeness is not None:
             completeness = self._completeness.validate(
                 pdf_path, record.questionnaire_type
@@ -218,22 +214,10 @@ class IntakeProcessor:
                     AuditEvent.COMPLETENESS_CHECKED, completeness.detail, record_id=record.id
                 )
             if completeness.checked and not completeness.complete:
+                _form_incomplete = True
                 self._audit.record(
                     AuditEvent.COMPLETENESS_INCOMPLETE,
-                    f"unanswered on {completeness.pages_label}",
-                    record_id=record.id,
-                )
-                approved = False
-                try:
-                    approved = bool(self.confirm_incomplete(record, completeness))
-                except Exception:
-                    logger.exception("Incomplete-form confirmation failed; returning to patient")
-                    approved = False
-                if not approved:
-                    return self._incomplete_declined(record, pdf_path, completeness)
-                self._audit.record(
-                    AuditEvent.INCOMPLETE_APPROVED,
-                    f"operator approved despite unanswered {completeness.pages_label}",
+                    f"unanswered on {completeness.pages_label} — uploading with incomplete description",
                     record_id=record.id,
                 )
 
@@ -289,7 +273,11 @@ class IntakeProcessor:
                 )
 
                 # ---- 4. Upload document into OSCAR ----
-                description = UPLOAD_DOCUMENT_DESCRIPTION
+                description = (
+                    UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE
+                    if _form_incomplete
+                    else UPLOAD_DOCUMENT_DESCRIPTION
+                )
                 document_id = oscar.upload_document(patient, pdf_path, description)
                 record.oscar_document_id = document_id
                 self._repo.update(record)
@@ -324,7 +312,10 @@ class IntakeProcessor:
             )
 
         # ---- 6. Done ----
-        if record.signature_present is False:
+        if _form_incomplete:
+            record.status = ProcessingStatus.INCOMPLETE_PATIENT_INFORMED
+            record.message = "Uploaded to OSCAR as incomplete — email patient to complete missing sections."
+        elif record.signature_present is False:
             record.status = ProcessingStatus.COMPLETED_NO_SIGNATURE
             record.message = "Uploaded to OSCAR — consent signature missing on form."
         else:
@@ -404,6 +395,7 @@ class IntakeProcessor:
             diff("First Name", "first_name", tool.first_name, chart.get("first")),
             diff("Last Name", "last_name", tool.last_name, chart.get("last")),
             diff("Preferred Name", "pref_name", tool.pref_name, chart.get("pref")),
+            diff("Pronoun", "pronoun", tool.pronoun, chart.get("pronoun"), require_tool=True),
         ):
             if d is not None:
                 out.append(d)
@@ -421,26 +413,6 @@ class IntakeProcessor:
     # ------------------------------------------------------------------
     # Terminal-state helpers
     # ------------------------------------------------------------------
-    def _incomplete_declined(
-        self, record: ProcessingRecord, pdf_path: Path, completeness
-    ) -> PipelineResult:
-        """Operator declined an incomplete form: stop, move to rejected/, NO
-        OSCAR upload, NO Sheets write — the form goes back to the patient."""
-        record.status = ProcessingStatus.INCOMPLETE_DECLINED
-        record.message = (
-            f"Returned to patient: unanswered questions on {completeness.pages_label}."
-        )
-        moved = safe_move(pdf_path, self._config.folders.rejected)
-        record.stored_path = str(moved)
-        self._repo.update(record)
-        self._audit.record(
-            AuditEvent.INCOMPLETE_DECLINED,
-            f"{record.message}; moved to {moved}; no OSCAR upload, no Sheets write",
-            record_id=record.id,
-        )
-        logger.warning("Incomplete (declined) %s", record.source_filename)
-        return PipelineResult(record, record.status, record.message)
-
     def _patient_not_found(self, record: ProcessingRecord, detail: str) -> PipelineResult:
         """Patient not in OSCAR: stop. NO upload, NO Sheets."""
         record.status = ProcessingStatus.PATIENT_NOT_FOUND

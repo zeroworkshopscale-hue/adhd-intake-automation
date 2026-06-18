@@ -4,7 +4,9 @@ OSCAR is a server-rendered EMR whose markup differs between versions and site
 customisations. To keep the automation maintainable, every page selector and
 URL fragment lives in :class:`OscarSelectors` so an integrator can adjust them
 to their instance **without touching the control flow**. The defaults follow
-the conventional OSCAR endpoint layout.
+the KAI OSCAR deployment at welcome.kai-oscar.com, which presents an Angular
+single-page app at /kaiemr/#/ as its front-end while the classic OSCAR Pro JSP
+endpoints remain accessible at /oscar/... on the same server.
 
 The client deliberately exposes a tiny surface:
 
@@ -26,6 +28,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:  # imported lazily at runtime (see _import_playwright)
     from playwright.sync_api import Browser, Page, Playwright
@@ -69,36 +72,52 @@ def _import_playwright():
 class OscarSelectors:
     """All instance-specific locators in one place. Override per deployment.
 
-    Confirmed against the live KAI deployment (welcome.kai-oscar.com), which is
-    a CLASSIC OSCAR Pro under ``/oscar`` (the ``/kaiemr/#/`` URL is just a
-    wrapper). Patient search below was verified end-to-end. The login and eDoc
-    upload selectors follow the same OSCAR Pro markup; verify the upload flow
-    with a supervised test before relying on it (see README).
+    Defaults target the KAI OSCAR deployment where the login entry-point is the
+    Angular SPA at /kaiemr/#/ and the classic OSCAR Pro JSP endpoints live under
+    /oscar/ on the same server origin. After a successful Angular login the
+    session cookie gives access to all /oscar/... endpoints.
     """
 
-    # --- login (standard OSCAR Pro) ---
-    login_path: str = "/index.jsp"
-    username_input: str = "input[name='username']"
-    password_input: str = "input[name='password']"
-    pin_input: str = "input[name='pin']"
-    login_submit: str = "#loginbutton2, input[type='submit'], button[type='submit']"
-    login_success_marker: str = "text=Schedule"  # visible once logged in
+    # --- Angular SPA login ---
+    # The login_path is appended to the server ORIGIN (scheme+host only) to
+    # form the login URL. An empty string means use the base_url directly.
+    login_path: str = ""
+    # Robust Angular-friendly selectors. The client uses .first on the locator
+    # so multiple matches are fine.
+    username_input: str = (
+        "input[name='username'], input[name='userName'], "
+        "input[type='text']:not([type='password']), "
+        "input[placeholder*='sername' i], input[placeholder*='user' i]"
+    )
+    password_input: str = "input[type='password']"
+    login_submit: str = (
+        "button[type='submit'], input[type='submit'], "
+        "button:has-text('Sign'), button:has-text('Log'), "
+        "button:has-text('Login'), button:has-text('Enter')"
+    )
+    # Marker visible AFTER successful login (before: login form is shown).
+    login_success_marker: str = (
+        "nav, "
+        "[class*='nav-'], [class*='sidebar'], [class*='dashboard'], "
+        "[class*='schedule'], [class*='menu'], "
+        "text=Schedule, text=Patient Search, text=Inbox"
+    )
 
-    # --- patient search (CONFIRMED) ---
-    # Search is a GET; we build the URL directly (no form/CSRF needed).
-    # demographiccontrol.jsp?search_mode=<mode>&keyword=<kw>&dboperation=search_titlename...
+    # --- classic OSCAR Pro endpoints (accessed after Angular login) ---
+    # Path within the server (appended to origin, NOT to base_url).
+    classic_prefix: str = "/oscar"
+
+    # --- patient search (CONFIRMED against KAI) ---
     search_results_path: str = "/demographic/demographiccontrol.jsp"
-    # Result rows: each patient's "Master Demographic File" link carries the id
-    # in its onclick: popup(...,'demographiccontrol.jsp?demographic_no=NNNN...').
     result_link: str = "a[onclick*='demographic_no']"
 
     # --- document upload (WELL eDoc form, confirmed field names) ---
     upload_path: str = "/dms/addDocument.jsp"
     upload_file_input: str = "input[name='docFile']"
-    upload_title_input: str = "input[name='docDesc']"          # the "Title"/description
-    upload_type_select: str = "#docType"                       # "Form" lives here
-    upload_class_select: str = "#docClass"                     # report class (optional)
-    upload_date_input: str = "#observationDate"               # prefilled to today
+    upload_title_input: str = "input[name='docDesc']"
+    upload_type_select: str = "#docType"
+    upload_class_select: str = "#docClass"
+    upload_date_input: str = "#observationDate"
     upload_submit: str = "input[type='submit'][value='Add']"
     upload_success_marker: str = "text=successfully"
 
@@ -118,18 +137,31 @@ class OscarClient:
         self._page: Optional["Page"] = None
         self._timeout_error: type[Exception] = TimeoutError
 
+    # ---- URL helpers -----------------------------------------------------
+    def _login_url(self) -> str:
+        """URL of the login page (the Angular SPA root or a specific route)."""
+        if self._sel.login_path:
+            parsed = urlparse(self._config.base_url)
+            return f"{parsed.scheme}://{parsed.netloc}{self._sel.login_path}"
+        return self._config.base_url
+
+    def _origin(self) -> str:
+        """Server origin (scheme + host, no path) derived from base_url."""
+        parsed = urlparse(self._config.base_url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _classic_url(self, path: str) -> str:
+        """URL for a classic OSCAR Pro JSP endpoint."""
+        return f"{self._origin()}{self._sel.classic_prefix}{path}"
+
     # ---- context management ---------------------------------------------
     def __enter__(self) -> "OscarClient":
         sync_playwright, timeout_error = _import_playwright()
         self._timeout_error = timeout_error
 
-        # Try the configured mode first. If headless login fails (some sites/
-        # Cloudflare block headless), automatically retry with a real browser
-        # positioned OFF-SCREEN — still invisible to the user, but undetectable
-        # as headless.
         attempts = [(self._config.headless, False)]
         if self._config.headless:
-            attempts.append((False, True))  # (headless=False, offscreen=True)
+            attempts.append((False, True))
 
         last_exc: Optional[BaseException] = None
         for headless, offscreen in attempts:
@@ -150,15 +182,11 @@ class OscarClient:
                     "Retrying off-screen…" if offscreen is False and len(attempts) > 1 else "",
                 )
             except BaseException:
-                # Other startup failure: tear down so we don't poison the thread.
                 self.__exit__(None, None, None)
                 raise
         raise last_exc if last_exc else OscarLoginError("OSCAR login failed.")
 
     def _launch_browser(self, headless: bool, offscreen: bool):
-        """Launch the browser. Prefers system Chrome (``channel='chrome'``),
-        falling back to bundled Chromium. When ``offscreen`` is set, a visible
-        browser is positioned far off-screen so it stays hidden from the user."""
         from .browser import ensure_chromium
 
         channel = (self._config.browser_channel or "").strip().lower()
@@ -204,31 +232,43 @@ class OscarClient:
             raise OscarError("OSCAR session is not started; use as a context manager.")
         return self._page
 
-    def _url(self, path: str) -> str:
-        return f"{self._config.base_url}{path}"
-
     # ---- login ----------------------------------------------------------
     def login(self) -> None:
-        logger.info("Logging into OSCAR at %s", self._config.base_url)
+        """Log into OSCAR via the Angular SPA login form."""
+        login_url = self._login_url()
+        logger.info("Logging into OSCAR Angular SPA at %s", login_url)
         page = self.page
         try:
-            page.goto(self._url(self._sel.login_path))
-            page.fill(self._sel.username_input, self._config.username)
-            page.fill(self._sel.password_input, self._config.password)
-            # Some OSCAR installs use a separate PIN; fill it with the password
-            # when a dedicated PIN isn't configured and the field exists.
-            if page.locator(self._sel.pin_input).count() > 0:
-                page.fill(self._sel.pin_input, self._config.password)
-            page.click(self._sel.login_submit)
+            page.goto(login_url)
+            page.wait_for_load_state("networkidle")
+
+            # Wait for the username field to appear (Angular renders asynchronously).
+            page.wait_for_selector(self._sel.username_input, timeout=self._config.timeout_ms)
+
+            username_loc = page.locator(self._sel.username_input).first
+            username_loc.fill(self._config.username)
+
+            password_loc = page.locator(self._sel.password_input).first
+            page.wait_for_selector(self._sel.password_input, timeout=self._config.timeout_ms)
+            password_loc.fill(self._config.password)
+
+            # Some OSCAR Angular builds have a separate PIN / OTP field.
+            pin_sel = "input[name='pin'], input[placeholder*='pin' i], input[placeholder*='PIN' i]"
+            if page.locator(pin_sel).count() > 0:
+                page.locator(pin_sel).first.fill(self._config.password)
+
+            submit_loc = page.locator(self._sel.login_submit).first
+            page.wait_for_selector(self._sel.login_submit, timeout=self._config.timeout_ms)
+            submit_loc.click()
             page.wait_for_load_state("networkidle")
             logger.info("OSCAR login submitted")
         except self._timeout_error as exc:
             raise OscarError(f"Timed out logging into OSCAR: {exc}") from exc
 
-        # Verify the login actually succeeded (wrong password -> marker absent).
+        # Verify login succeeded.
         try:
-            page.wait_for_selector(self._sel.login_success_marker, timeout=15000)
-            logger.info("OSCAR login successful")
+            page.wait_for_selector(self._sel.login_success_marker, timeout=15_000)
+            logger.info("OSCAR login successful — current URL: %s", page.url)
         except self._timeout_error:
             raise OscarLoginError(
                 "OSCAR login failed — please check your username and password."
@@ -241,20 +281,7 @@ class OscarClient:
         select_cb=None,
         email_cb=None,
     ) -> PatientMatch:
-        """Resolve a SINGLE patient with an escalating, safe strategy.
-
-        Tiers (stop at the first that resolves):
-          1. Exact "Last, First" — auto-use if it uniquely matches the chart.
-          2. First-3 letters of the last name — auto-use if it uniquely matches.
-          3. Date of birth — list every patient with that DOB and let the
-             operator pick (``select_cb``).
-          4. Email — use the tool's email, or ask the operator (``email_cb``),
-             to pin the exact chart.
-
-        ``select_cb(candidates) -> demographic_no | None`` and
-        ``email_cb(label) -> email | None`` are optional (skipped when None,
-        e.g. headless), so auto-matching alone is always safe.
-        """
+        """Resolve a SINGLE patient with an escalating, safe strategy."""
         last = (demographics.last_name or "").strip()
         first = (demographics.first_name or "").strip()
         logger.info(
@@ -267,8 +294,6 @@ class OscarClient:
                 "be skipped (falling back to DOB / email)."
             )
 
-        # Charts whose NAME matches the form but whose DOB did not — kept so the
-        # operator can confirm them (a mistyped DOB must not hide a real patient).
         name_only: dict[str, dict] = {}
 
         def remember_name_only(evaluated: list[tuple[str, dict]]) -> None:
@@ -288,7 +313,7 @@ class OscarClient:
                 return m
             remember_name_only(evaluated)
 
-        # Tier 2 — partial: first 3 letters of last name + first 3 of first name.
+        # Tier 2 — partial.
         if last:
             keyword = f"{last[:3]},{first[:3]}" if first else last[:3]
             m, evaluated = self._auto_match(
@@ -299,9 +324,7 @@ class OscarClient:
                 return m
             remember_name_only(evaluated)
 
-        # Tier 3 — let the operator choose. The list contains: (a) charts whose
-        # name matched but DOB conflicted (shown first, with a note), then (b)
-        # every chart found by searching the form's date of birth.
+        # Tier 3 — DOB list + operator select.
         form_dob = Demographics.normalise_dob(demographics.dob) or (demographics.dob or "")
         ordered: list[str] = list(name_only.keys())
         for d in demographics.dob_candidates():
@@ -322,8 +345,7 @@ class OscarClient:
                     )
                 details.append(info)
             logger.info(
-                "Selection list: %d patient(s) (%d name-match, rest DOB) — asking operator",
-                len(details), len(name_only),
+                "Selection list: %d patient(s) — asking operator", len(details),
             )
             chosen = select_cb(details)
             if chosen:
@@ -335,7 +357,7 @@ class OscarClient:
                     matched_by="operator selected",
                 )
 
-        # Tier 4 — email (from the tool, or ask the operator).
+        # Tier 4 — email.
         email = (demographics.email or "").strip()
         if not email and email_cb is not None:
             email = (email_cb(demographics.display_name) or "").strip()
@@ -348,7 +370,7 @@ class OscarClient:
                     last_name=d.get("last", ""), first_name=d.get("first", ""),
                     email=email, dob=d.get("dob"), matched_by="email",
                 )
-            m = self._auto_match(cands, demographics, "email")
+            m, _ = self._auto_match(cands, demographics, "email")
             if m:
                 return m
 
@@ -360,11 +382,6 @@ class OscarClient:
     def _auto_match(
         self, candidates: list[str], demographics: Demographics, label: str
     ) -> tuple[Optional[PatientMatch], list[tuple[str, dict]]]:
-        """Return ``(match, evaluated)`` where ``match`` is a PatientMatch only
-        when exactly ONE candidate's chart confidently matches (name + DOB);
-        otherwise None. ``evaluated`` is the list of ``(demo, details)`` charts
-        read, so the caller can reuse them (e.g. to offer near-matches to the
-        operator) without re-fetching."""
         confident: list[tuple[str, dict, str]] = []
         evaluated: list[tuple[str, dict]] = []
         for demo in candidates[:8]:
@@ -399,7 +416,7 @@ class OscarClient:
 
         page = self.page
         url = (
-            f"{self._url(self._sel.search_results_path)}"
+            f"{self._classic_url(self._sel.search_results_path)}"
             f"?search_mode={mode}"
             f"&keyword={quote(keyword)}"
             f"&dboperation=search_titlename"
@@ -407,7 +424,7 @@ class OscarClient:
         )
         try:
             page.goto(url)
-            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_load_state("networkidle")
         except self._timeout_error:
             logger.warning("OSCAR search timed out for %s=%r", mode, keyword)
             return []
@@ -427,19 +444,10 @@ class OscarClient:
         return self._get_demographic_details(demo)
 
     def update_demographic(self, demo: str, changes: dict[str, str]) -> bool:
-        """Update demographic fields by driving the real edit form.
-
-        ``changes`` maps OSCAR field names (last_name, first_name, pref_name,
-        address) to new values. We load the edit form (which carries every
-        existing value + dboperation=update_record), set only the changed
-        fields, and click "Update Record" — exactly like a manual edit, so no
-        other data is disturbed. Returns True on apparent success.
-        """
+        """Update demographic fields by driving the real edit form."""
         if not changes:
             return True
         changes = dict(changes)
-        # DOB lives in OSCAR as three separate fields. Expand "dob" (YYYY-MM-DD)
-        # into year/month/date so the generic setter below applies it.
         want_dob = changes.pop("dob", None)
         if want_dob:
             parts = str(want_dob).split("-")
@@ -450,9 +458,10 @@ class OscarClient:
         page = self.page
         try:
             page.goto(
-                f"{self._url('/demographic/demographiccontrol.jsp')}"
+                f"{self._classic_url('/demographic/demographiccontrol.jsp')}"
                 f"?demographic_no={demo}&displaymode=edit&dboperation=search_detail"
             )
+            page.wait_for_load_state("networkidle")
             page.wait_for_selector("input[name='last_name']", timeout=self._config.timeout_ms, state="attached")
             applied = page.evaluate(
                 """(changes) => {
@@ -466,14 +475,13 @@ class OscarClient:
                 changes,
             )
             logger.info("Demographic %s: set fields %s", demo, applied)
-            # Click the real "Update Record" submit (not "Save & Update Family Members").
             submit = page.locator("input[type='submit'][value='Update Record']").first
             try:
                 with page.expect_navigation(timeout=self._config.timeout_ms):
                     submit.click()
             except Exception:
                 submit.click()
-            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_load_state("networkidle")
             logger.info("Demographic %s update submitted; url=%s", demo, page.url)
         except self._timeout_error as exc:
             logger.warning("Demographic update timed out for %s: %s", demo, exc)
@@ -482,7 +490,6 @@ class OscarClient:
             logger.exception("Demographic update failed for %s", demo)
             return False
 
-        # Self-verify: re-read the chart and confirm each change actually saved.
         try:
             after = self._get_demographic_details(demo)
             field_to_key = {
@@ -508,36 +515,41 @@ class OscarClient:
             return True
         except Exception:
             logger.debug("Could not verify demographic update for %s", demo, exc_info=True)
-            return True  # submitted; verification just couldn't run
+            return True
 
     def _get_demographic_details(self, demo: str) -> dict:
-        """Read a candidate's chart (name, pref, address, DOB, sex) for verification."""
+        """Read a candidate's chart (name, pref, address, DOB, sex, pronoun) for verification."""
         page = self.page
         try:
             page.goto(
-                f"{self._url('/demographic/demographiccontrol.jsp')}"
+                f"{self._classic_url('/demographic/demographiccontrol.jsp')}"
                 f"?demographic_no={demo}&displaymode=edit&dboperation=search_detail"
             )
+            page.wait_for_load_state("networkidle")
             page.wait_for_selector("input[name='last_name']", timeout=self._config.timeout_ms, state="attached")
             data = page.evaluate(
                 """() => {
                     const g = (n) => { const e = document.querySelector(`[name='${n}']`); return e ? String(e.value) : ''; };
-                    // Build DOB from the unambiguous numeric fields (avoids date-format issues).
                     const y = g('year_of_birth'), m = g('month_of_birth'), d = g('date_of_birth');
                     let dob = '';
                     if (y && m && d) dob = y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-                    // Booking Alert: prefer a named field, else any field whose name
-                    // contains 'alert' (the exact field name varies by OSCAR build).
                     let alert = g('alert') || g('patientAlert') || g('bookingAlert');
                     if (!alert) {
                         for (const e of document.querySelectorAll('input,textarea')) {
                             if ((e.name||'').toLowerCase().includes('alert') && e.value) { alert = String(e.value); break; }
                         }
                     }
+                    // Pronoun: check named field or a select/input that mentions pronoun.
+                    let pronoun = g('pronoun') || g('preferredPronoun') || g('preferred_pronoun');
+                    if (!pronoun) {
+                        for (const e of document.querySelectorAll('input,select,textarea')) {
+                            if ((e.name||'').toLowerCase().includes('pronoun') && e.value) { pronoun = String(e.value); break; }
+                        }
+                    }
                     return {last: g('last_name'), first: g('first_name'), pref: g('pref_name'),
                             address: g('address'), city: g('city'), province: g('province'),
                             postal: g('postal'), dob: dob || g('full_birth_date'), sex: g('sex'),
-                            email: g('email'), booking_alert: alert};
+                            email: g('email'), booking_alert: alert, pronoun: pronoun};
                 }"""
             )
         except Exception:
@@ -548,13 +560,6 @@ class OscarClient:
 
     @staticmethod
     def _is_confident_match(ext: Demographics, details: dict) -> tuple[bool, str]:
-        """Decide whether a chart is the same person as the assessment tool.
-
-        Rule (safe by design):
-          * If the tool has a DOB: require the chart DOB to match AND the
-            last-name first-3 letters to match.
-          * Otherwise: require first-3 of both first and last name to match.
-        """
         if not details:
             return False, "chart unreadable"
 
@@ -563,7 +568,6 @@ class OscarClient:
 
         el, ef = n(ext.last_name), n(ext.first_name)
         cl, cf = n(details.get("last")), n(details.get("first"))
-        # All plausible readings of the form's DOB vs OSCAR's canonical date.
         ext_dobs = ext.dob_candidates() or ([Demographics.normalise_dob(ext.dob)] if ext.dob else [])
         ext_dobs = [d for d in ext_dobs if d]
         cd = Demographics.normalise_dob(details.get("dob"))
@@ -572,7 +576,7 @@ class OscarClient:
         first3 = bool(ef) and bool(cf) and ef[:3] == cf[:3]
         dob_match = bool(cd) and cd in ext_dobs
 
-        if ext_dobs:  # DOB available on the tool — use it as the strong signal.
+        if ext_dobs:
             if dob_match and last3:
                 return True, "DOB + last-name match"
             if dob_match and not last3:
@@ -584,9 +588,6 @@ class OscarClient:
 
     @staticmethod
     def _name_matches(ext: Demographics, details: dict) -> bool:
-        """True if the chart's name strongly matches the tool's name, IGNORING
-        DOB. Used to offer name-matched charts to the operator when the DOB on
-        the form conflicts (so a mistyped DOB doesn't hide a real patient)."""
         if not details:
             return False
 
@@ -603,7 +604,6 @@ class OscarClient:
 
     @staticmethod
     def _parse_demographic_no(text: str) -> Optional[str]:
-        # onclick like: popup(...,'demographiccontrol.jsp?demographic_no=12345&...')
         m = re.search(r"demographic_?no=(\d+)", text or "", re.IGNORECASE)
         return m.group(1) if m else None
 
@@ -614,45 +614,22 @@ class OscarClient:
         pdf_path: Path,
         description: str,
     ) -> str:
-        """Upload ``pdf_path`` into the patient's OSCAR eDocuments.
-
-        Replicates the manual eDoc upload exactly (verified against the live KAI
-        instance, 2026-06-13):
-
-          * Load the eDoc page via ``documentReport.jsp?function=demographic&
-            functionid=<no>`` (lowercase ``functionid``). This is the entry point
-            the chart uses; it redirects to addDocument.jsp with the hidden
-            fields correctly populated (functionId=<no>, appointmentNo=0,
-            curUser empty). Loading addDocument.jsp directly with capital
-            ``functionId`` leaves those as the literal "null" and the document
-            ends up unlinked in the inbox.
-          * Fill Title (= description) and Type (= "Form"), attach the file, and
-            submit the REAL form (a navigation), which is what files it to the
-            chart. (An API POST is rejected/handled differently by KAI.)
-
-        Returns a document reference on success.
-        """
+        """Upload ``pdf_path`` into the patient's OSCAR eDocuments."""
         page = self.page
         demo = patient.demographic_no
         logger.info("Uploading %s for demographic %s (type=%s)", pdf_path.name, demo, self._config.document_type)
 
         try:
-            # 1) Open the eDoc page the same way the chart does (lowercase
-            #    functionid). It redirects to addDocument.jsp with correct context.
             report_url = (
-                f"{self._url('/dms/documentReport.jsp')}"
+                f"{self._classic_url('/dms/documentReport.jsp')}"
                 f"?function=demographic&functionid={demo}"
             )
             page.goto(report_url)
-            # The file input exists but is hidden inside the collapsed section,
-            # so wait for it to be ATTACHED (present), not visible.
+            page.wait_for_load_state("networkidle")
             page.wait_for_selector(
                 self._sel.upload_file_input, timeout=self._config.timeout_ms, state="attached"
             )
 
-            # 2) Reveal the collapsed section AND set Title + Type via JS (robust,
-            #    no dependence on visibility timing), and log the server-populated
-            #    context so we can confirm it matches a manual upload.
             ctx = page.evaluate(
                 """([description, typeLabel]) => {
                     const file = document.querySelector("input[name='docFile']");
@@ -676,26 +653,22 @@ class OscarClient:
             )
             logger.info("UPLOAD form context: %s", ctx)
 
-            # 3) Attach the file (set_input_files works on the hidden input).
             page.set_input_files(self._sel.upload_file_input, str(pdf_path))
 
-            # 4) Submit the REAL form (navigation) — exactly like a manual upload.
             submit = page.locator(self._sel.upload_submit).first
             try:
                 with page.expect_navigation(timeout=self._config.timeout_ms):
                     submit.click()
             except Exception:
-                # Some submits replace content without a full navigation event.
                 try:
                     submit.click()
                 except Exception:
                     logger.debug("Submit click fallback failed", exc_info=True)
-            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_load_state("networkidle")
             logger.info("UPLOAD submitted; post-submit url=%s", page.url)
         except self._timeout_error as exc:
             raise OscarError(f"Timed out uploading document to OSCAR: {exc}") from exc
 
-        # 6) Best-effort verification (advisory; the operator can confirm chart).
         if self._verify_document(demo, description):
             logger.info("Verified document attached to demographic %s", demo)
         else:
@@ -707,15 +680,13 @@ class OscarClient:
         return f"{demo}:{description}"
 
     def _verify_document(self, demo: str, description: str) -> bool:
-        """Best-effort: return True if ``description`` appears on the patient's
-        eDoc page after upload."""
         page = self.page
         try:
             page.goto(
-                f"{self._url('/dms/documentReport.jsp')}"
+                f"{self._classic_url('/dms/documentReport.jsp')}"
                 f"?function=demographic&functionid={demo}"
             )
-            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_load_state("networkidle")
             return description in page.inner_text("body")
         except Exception:
             logger.debug("Document verification step failed", exc_info=True)

@@ -1,11 +1,11 @@
-"""Tests for questionnaire response-completeness validation and its pipeline gate.
+"""Tests for questionnaire response-completeness validation and pipeline behaviour.
 
 Covers:
   * CompletenessResult.pages_label formatting
   * the validator on synthetic rating-grid PDFs (all answered / a blank row)
   * the validator skipping (checked=False) when there is no response grid
-  * the pipeline gate: decline -> INCOMPLETE_DECLINED (no upload, no sheets,
-    moved to rejected); approve -> COMPLETED
+  * the pipeline: incomplete forms always upload with INCOMPLETE_PATIENT_INFORMED
+  * adaptive thresholds (pages 8+)
 """
 
 from __future__ import annotations
@@ -267,47 +267,71 @@ def _incomplete() -> CompletenessResult:
     )
 
 
-def test_decline_incomplete_stops_without_upload(config, db, sample_pdf):
+def test_incomplete_form_always_uploads(config, db, sample_pdf):
+    """Incomplete forms must ALWAYS be uploaded — no approval gate."""
     oscar = FakeOscar(match=PatientMatch("321", "Doe", "Jane"))
     sheets = FakeSheets()
     proc, _ = _build_gate_processor(
         config, db, completeness=_incomplete(), decision=False, oscar=oscar, sheets=sheets
     )
     result = proc.process(sample_pdf)
-    assert result.status is ProcessingStatus.INCOMPLETE_DECLINED
-    assert oscar.find_calls == []
-    assert oscar.upload_calls == []
-    assert sheets.rows == []
-    assert list(config.folders.rejected.glob("*.pdf"))
-    assert not sample_pdf.exists()
+    assert result.status is ProcessingStatus.INCOMPLETE_PATIENT_INFORMED
+    # Must have been uploaded to OSCAR and written to sheets.
+    assert oscar.upload_calls, "Incomplete form should still be uploaded"
+    assert oscar.upload_calls[0][0] == "321"
+    assert len(sheets.rows) == 1
+    # Should NOT be in the rejected folder.
+    assert not list(config.folders.rejected.glob("*.pdf"))
+    # Uploaded with the incomplete description.
+    from adhd_intake.pipeline.processor import UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE
+    assert oscar.upload_calls[0][2] == UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE
 
 
-def test_approve_incomplete_continues_to_upload(config, db, sample_pdf):
+def test_incomplete_upload_description_differs_from_complete(config, db, sample_pdf):
+    """Incomplete and complete forms must use different OSCAR document descriptions."""
+    from adhd_intake.pipeline.processor import (
+        UPLOAD_DOCUMENT_DESCRIPTION,
+        UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE,
+    )
+    assert UPLOAD_DOCUMENT_DESCRIPTION != UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE
+    assert "Incomplete" in UPLOAD_DOCUMENT_DESCRIPTION_INCOMPLETE
+
+
+def test_complete_form_uploads_with_standard_description(config, db, sample_pdf):
+    """A fully-answered form uses the standard document description."""
+    from adhd_intake.pipeline.processor import UPLOAD_DOCUMENT_DESCRIPTION
+
     oscar = FakeOscar(match=PatientMatch("654", "Doe", "Jane"))
     sheets = FakeSheets()
+    complete = CompletenessResult(complete=True, checked=True, detail="ok")
     proc, _ = _build_gate_processor(
-        config, db, completeness=_incomplete(), decision=True, oscar=oscar, sheets=sheets
+        config, db, completeness=complete, decision=True, oscar=oscar, sheets=sheets
     )
     result = proc.process(sample_pdf)
     assert result.status is ProcessingStatus.COMPLETED
-    assert oscar.upload_calls and oscar.upload_calls[0][0] == "654"
-    assert len(sheets.rows) == 1
+    assert oscar.upload_calls and oscar.upload_calls[0][2] == UPLOAD_DOCUMENT_DESCRIPTION
 
 
-def test_complete_form_never_asks(config, db, sample_pdf):
-    asked = {"n": 0}
+def test_complete_form_never_calls_confirm_incomplete(config, db, sample_pdf):
+    """confirm_incomplete should never be called for complete forms (it no longer exists
+    in the pipeline — this test just verifies the pipeline runs without it)."""
     oscar = FakeOscar(match=PatientMatch("777", "Doe", "Jane"))
     sheets = FakeSheets()
     complete = CompletenessResult(complete=True, checked=True, detail="ok")
     proc, _ = _build_gate_processor(
         config, db, completeness=complete, decision=False, oscar=oscar, sheets=sheets
     )
-
-    def _count(record, comp):
-        asked["n"] += 1
-        return False
-
-    proc.confirm_incomplete = _count
     result = proc.process(sample_pdf)
     assert result.status is ProcessingStatus.COMPLETED
-    assert asked["n"] == 0  # complete form must not prompt
+
+
+# --- Adaptive threshold: pages 8+ use lower thresholds ---------------------
+def test_adaptive_threshold_later_pages():
+    """Pages 8+ apply a 0.5x factor — verify the validator object exposes it."""
+    v = _validator()
+    # The page_factor used internally is 0.5 for pages >= 8. We can't call
+    # _check_page_ink directly without a real PDF, but we can smoke-test that
+    # the validator instantiates without error and produces useful defaults.
+    cfg = v._cfg
+    assert cfg.response_min_ink > 0
+    assert cfg.response_rel_margin > 0

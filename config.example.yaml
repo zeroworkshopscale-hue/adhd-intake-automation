@@ -48,8 +48,9 @@ validation:
 
 # --- OSCAR Pro / KAI EMR ----------------------------------------------------
 oscar:
-  # Your KAI EMR base URL (the path prefix before /Login, /PatientSearch, etc.)
-  base_url: "https://welcome.kai-oscar.com/oscar"   # REPLACE_ME if different
+  # KAI EMR Angular SPA URL. The app logs in through the Angular front-end and
+  # accesses classic OSCAR endpoints via the same session.
+  base_url: "https://welcome.kai-oscar.com/kaiemr/#/"
   # true = browser runs hidden; false = visible (recommended for first few runs)
   headless: true
   # chrome = your installed Google Chrome (recommended, no download needed)
@@ -94,7 +95,7 @@ sheets:
   # field options: blank, date, datetime, demographic_no, email, first_name,
   #   last_name, full_name, dob, age, phone, health_card, pronoun,
   #   questionnaire_type, signature, status, oscar_document_id, source_filename,
-  #   program_status, province
+  #   program_status, province, referral_source
   # Use form:<PDF field name> to pull a raw questionnaire answer.
   columns:
     - {header: "MSP/ Private3",           field: program_status}
@@ -109,7 +110,7 @@ sheets:
     - {header: "",                        field: blank}
     - {header: "",                        field: blank}
     - {header: "",                        field: blank}
-    - {header: "How did they hear about us?", field: blank}
+    - {header: "How did they hear about us?", field: referral_source}
     - {header: "",                        field: blank}
     - {header: "Coach/Doctor/Counsellor Name", field: "form:Doctor (name):|Counsellor (name):|Coach (name):"}
     - {header: "Future initiatives?",     field: "form:future_initiatives"}

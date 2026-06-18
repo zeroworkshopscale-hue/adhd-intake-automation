@@ -58,6 +58,7 @@ FIELD_RESOLVERS: dict[str, Callable[[ProcessingRecord], str]] = {
     "health_card": lambda r: r.demographics.health_card or "",
     "pronoun": lambda r: r.demographics.pronoun or "",
     "province": lambda r: r.demographics.province or "",
+    "referral_source": lambda r: str(r.answers.get("referral_source", "")),
     "program_status": lambda r: r.demographics.program_status or "",
     "questionnaire_type": lambda r: r.questionnaire_type.value,
     "signature": _signature,

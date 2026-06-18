@@ -45,9 +45,10 @@ logger = get_logger(__name__)
 
 _STATUS_COLORS = {
     ProcessingStatus.COMPLETED: QColor("#1a7f37"),
-    ProcessingStatus.COMPLETED_NO_SIGNATURE: QColor("#d97706"),   # amber
-    ProcessingStatus.REJECTED_NO_SIGNATURE: QColor("#b30000"),    # legacy
-    ProcessingStatus.INCOMPLETE_DECLINED: QColor("#b36b00"),
+    ProcessingStatus.COMPLETED_NO_SIGNATURE: QColor("#d97706"),       # amber
+    ProcessingStatus.INCOMPLETE_PATIENT_INFORMED: QColor("#7c3aed"),  # purple
+    ProcessingStatus.REJECTED_NO_SIGNATURE: QColor("#b30000"),        # legacy
+    ProcessingStatus.INCOMPLETE_DECLINED: QColor("#b36b00"),          # legacy
     ProcessingStatus.PATIENT_NOT_FOUND: QColor("#b36b00"),
     ProcessingStatus.ERROR: QColor("#b30000"),
 }
@@ -157,7 +158,6 @@ class MainWindow(QMainWindow):
         self._worker.finished_file.connect(self._on_finished_file)
         self._worker.error_file.connect(self._on_error_file)
         self._worker.confirm_update_requested.connect(self._on_confirm_update)
-        self._worker.incomplete_requested.connect(self._on_incomplete)
         self._worker.select_patient_requested.connect(self._on_select_patient)
         self._worker.email_requested.connect(self._on_ask_email)
         self._worker.idle.connect(lambda: self.statusBar().showMessage("Idle"))
@@ -182,24 +182,7 @@ class MainWindow(QMainWindow):
         self._log(f"  Email match: {'entered' if email else 'skipped'}")
         self._worker.provide_email(email)
 
-    def _on_incomplete(self, record, completeness) -> None:
-        """Ask whether to continue despite unanswered rows; on decline, offer a
-        follow-up email to the patient."""
-        from .incomplete_dialog import IncompleteFormDialog
-
-        name = record.patient_name() or record.source_filename
-        approved = IncompleteFormDialog.ask(name, completeness, parent=self)
-        self._log(
-            f"  Incomplete sections on {completeness.pages_label} for {name}: "
-            + ("operator approved — continuing" if approved
-               else "declined — returning to patient")
-        )
-        # Unblock the worker first, then (if declined) show the email to copy.
-        self._worker.provide_incomplete_decision(approved)
-        if not approved:
-            self._show_incomplete_email(record, completeness)
-
-    def _show_incomplete_email(self, record, completeness) -> None:
+    def _show_incomplete_email(self, record, pages_label: str = "") -> None:
         from .consent_email import ConsentEmailDialog, build_incomplete_email
 
         first = record.demographics.first_name
@@ -208,15 +191,14 @@ class MainWindow(QMainWindow):
             patient_email=record.demographics.email,
             source_filename=record.source_filename,
             parent=self,
-            title="Incomplete sections — request completion",
-            heading_text="Incomplete sections — request completion",
+            title="Incomplete sections  --  request completion",
+            heading_text="Incomplete sections  --  request completion",
             info_text=(
-                f"Unanswered questions were found on {completeness.pages_label} of "
-                f"“{record.source_filename}”.\n"
-                "This file was not uploaded to OSCAR and was not logged.\n"
+                f"The form '{record.source_filename}' had unanswered sections{' on ' + pages_label if pages_label else ''}.\n"
+                "It was uploaded to OSCAR as 'ADHD Assessment Tool - Incomplete'.\n"
                 "Copy the email below and send it to the patient from Outlook."
             ),
-            body_text=build_incomplete_email(first, completeness.pages_label),
+            body_text=build_incomplete_email(first, pages_label or "some pages"),
         )
         dlg.exec()
 
@@ -257,22 +239,30 @@ class MainWindow(QMainWindow):
         self._log(f"  -> {record.status.value}: {record.message}")
         if record.status is ProcessingStatus.COMPLETED:
             self._drop_zone.set_state(
-                "success", f"{record.patient_name() or record.source_filename} — uploaded to OSCAR"
+                "success", f"{record.patient_name() or record.source_filename}  --  uploaded to OSCAR"
             )
             self._refresh_patient_table()
         elif record.status is ProcessingStatus.COMPLETED_NO_SIGNATURE:
             self._drop_zone.set_state(
                 "success",
-                f"{record.patient_name() or record.source_filename} — uploaded; signature missing",
+                f"{record.patient_name() or record.source_filename}  --  uploaded; signature missing",
             )
             self._refresh_patient_table()
             self._show_consent_email(record)
+        elif record.status is ProcessingStatus.INCOMPLETE_PATIENT_INFORMED:
+            self._drop_zone.set_state(
+                "success",
+                f"{record.patient_name() or record.source_filename}  --  uploaded (incomplete)",
+            )
+            self._refresh_patient_table()
+            self._show_incomplete_email(record)
         elif record.status is ProcessingStatus.REJECTED_NO_SIGNATURE:
-            # Legacy status — kept for records in older databases.
-            self._drop_zone.set_state("error", "Rejected — consent not signed")
+            # Legacy status  --  kept for records in older databases.
+            self._drop_zone.set_state("error", "Rejected  --  consent not signed")
             self._show_consent_email(record)
         elif record.status is ProcessingStatus.INCOMPLETE_DECLINED:
-            self._drop_zone.set_state("error", "Incomplete — returned to patient")
+            # Legacy status  --  kept for records in older databases.
+            self._drop_zone.set_state("error", "Incomplete  --  returned to patient")
         elif record.status is ProcessingStatus.PATIENT_NOT_FOUND:
             self._drop_zone.set_state("error", "Patient not found / not confirmed")
         elif (
@@ -297,7 +287,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if creds is None:
-            self._log("Login not updated — file not retried.")
+            self._log("Login not updated  --  file not retried.")
             return
         self._services.set_oscar_credentials(*creds)
         self._log(f"OSCAR login updated for '{creds[0]}'. Retrying {record.source_filename}…")
@@ -367,7 +357,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _copy_selection(self) -> None:
         """Copy the selected cells (Demographic No / Name / Email …) to the
-        clipboard — tab-separated within a row, newline between rows."""
+        clipboard  --  tab-separated within a row, newline between rows."""
         items = self._table.selectedItems()
         if not items:
             return
