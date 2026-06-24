@@ -472,14 +472,26 @@ class OscarClient:
                     const done = [];
                     for (const [name, value] of Object.entries(changes)) {
                         const el = document.querySelector(`[name='${name}']`);
-                        if (el) { el.value = value; el.dispatchEvent(new Event('change')); done.push(name); }
+                        if (el) {
+                            el.value = value;
+                            // Fire both events (bubbling) so any field listener
+                            // registers the overwrite before we submit/save.
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            done.push(name);
+                        }
                     }
                     return done;
                 }""",
                 changes,
             )
-            logger.info("Demographic %s: set fields %s", demo, applied)
-            submit = page.locator("input[type='submit'][value='Update Record']").first
+            logger.info("Demographic %s: set fields %s (requested %s)", demo, applied, list(changes))
+            submit = page.locator(
+                "input[type='submit'][value='Update Record'], "
+                "input[type='button'][value='Update Record'], "
+                "input[type='submit'][value*='Update'], "
+                "button:has-text('Update Record'), button:has-text('Save')"
+            ).first
             try:
                 with page.expect_navigation(timeout=self._config.timeout_ms):
                     submit.click()

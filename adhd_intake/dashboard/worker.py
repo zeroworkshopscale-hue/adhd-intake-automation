@@ -43,7 +43,7 @@ class ProcessingWorker(QObject):
         self._running = True
         # Cross-thread handshakes (one per interactive request type).
         self._confirm_event = threading.Event()
-        self._confirm_result = False
+        self._confirm_result: list = []   # approved discrepancy rows (subset)
         self._incomplete_event = threading.Event()
         self._incomplete_result = True
         self._select_event = threading.Event()
@@ -56,20 +56,24 @@ class ProcessingWorker(QObject):
         self._processor.select_patient = self._request_patient_selection
         self._processor.ask_email = self._request_email
 
-    def _request_confirmation(self, record, discrepancies) -> bool:
-        """Blocking (worker-thread) request for operator approval via the GUI."""
-        self._confirm_result = False
+    def _request_confirmation(self, record, discrepancies) -> list:
+        """Blocking (worker-thread) request for operator approval via the GUI.
+
+        Returns the list of approved discrepancy rows (a subset; empty = none),
+        so the operator can update individual fields or all of them.
+        """
+        self._confirm_result = []
         self._confirm_event.clear()
         self.confirm_update_requested.emit(record, discrepancies)
         # Wait for the GUI thread to answer (generous timeout; default: decline).
         if not self._confirm_event.wait(timeout=300):
             logger.warning("Discrepancy confirmation timed out; not updating chart")
-            return False
+            return []
         return self._confirm_result
 
-    def provide_confirmation(self, approved: bool) -> None:
-        """Called on the GUI thread with the operator's decision."""
-        self._confirm_result = bool(approved)
+    def provide_confirmation(self, approved) -> None:
+        """Called on the GUI thread with the operator's decision (list of rows)."""
+        self._confirm_result = list(approved) if approved else []
         self._confirm_event.set()
 
     def _request_incomplete_decision(self, record, completeness) -> bool:

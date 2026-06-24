@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -60,6 +61,9 @@ class MainWindow(QMainWindow):
         self._services = services
         self._session_start = services.session_start
         self._sig_missing_only = False   # filter toggle for "Signature Missing" view
+        # Batch progress counters (drive the "Processing X of N" bar).
+        self._batch_total = 0
+        self._batch_done = 0
         self.setWindowTitle("ADHD Intake Automation")
         self.resize(900, 700)
 
@@ -107,6 +111,21 @@ class MainWindow(QMainWindow):
         top_row.addLayout(right_col, 1)
 
         layout.addLayout(top_row)
+
+        # ---- Progress bar (visible while a batch is processing) ----
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
+        self._progress_label = QLabel("")
+        self._progress_label.setObjectName("SectionLabel")
+        self._progress_label.hide()
+        self._progress = QProgressBar()
+        self._progress.setTextVisible(True)
+        self._progress.setFormat("%v / %m")
+        self._progress.setFixedHeight(20)
+        self._progress.hide()
+        progress_row.addWidget(self._progress_label)
+        progress_row.addWidget(self._progress, 1)
+        layout.addLayout(progress_row)
 
         # ---- Processed Patients (full-width list) ----
         table_header_row = QHBoxLayout()
@@ -203,29 +222,66 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_confirm_update(self, record, discrepancies) -> None:
-        """Show the red Alert dialog and return the decision to the worker."""
+        """Show the red Alert dialog and return the decision to the worker.
+
+        The dialog returns the list of approved rows (per-row or all), so the
+        operator can overwrite individual fields or every field in OSCAR.
+        """
         from .alert_dialog import DiscrepancyAlertDialog
 
         approved = DiscrepancyAlertDialog.ask(
             record.patient_name() or record.source_filename, discrepancies, parent=self
         )
-        self._log(
-            f"  Chart mismatch for {record.patient_name()}: "
-            + ("operator approved update" if approved else "kept OSCAR unchanged")
-        )
+        if approved:
+            fields = ", ".join(d.field_label for d in approved)
+            self._log(
+                f"  Chart mismatch for {record.patient_name()}: updating "
+                f"{len(approved)} of {len(discrepancies)} field(s) in OSCAR — {fields}"
+            )
+        else:
+            self._log(
+                f"  Chart mismatch for {record.patient_name()}: kept OSCAR unchanged"
+            )
         self._worker.provide_confirmation(approved)
 
     # ------------------------------------------------------------------
     def _on_files_dropped(self, paths: list[Path]) -> None:
+        # Start a fresh count if the previous batch had already finished.
+        if self._batch_total > 0 and self._batch_done >= self._batch_total:
+            self._batch_total = 0
+            self._batch_done = 0
+        self._batch_total += len(paths)
         for path in paths:
             self._log(f"Queued: {path.name}")
             self._worker.enqueue(path)
         self.statusBar().showMessage(f"Processing {len(paths)} file(s)…")
+        self._update_progress()
+
+    def _update_progress(self, current_name: str = "") -> None:
+        """Refresh the 'Processing X of N' bar from the batch counters."""
+        total, done = self._batch_total, self._batch_done
+        if total <= 0:
+            self._progress.hide()
+            self._progress_label.hide()
+            return
+        self._progress.show()
+        self._progress_label.show()
+        self._progress.setRange(0, total)
+        self._progress.setValue(min(done, total))
+        if done >= total:
+            self._progress_label.setText(f"Done — processed {total} file(s)")
+        else:
+            shown = min(done + 1, total)
+            label = f"Processing {shown} of {total}"
+            if current_name:
+                label += f"  ·  {current_name}"
+            self._progress_label.setText(label)
 
     def _on_started_file(self, filename: str) -> None:
         self._log(f"Processing: {filename}")
         self.statusBar().showMessage(f"Processing {filename}…")
         self._drop_zone.set_state("processing", f"Processing {filename}")
+        self._update_progress(filename)
 
     def _on_sig_filter_toggled(self, checked: bool) -> None:
         self._sig_missing_only = checked
@@ -236,6 +292,8 @@ class MainWindow(QMainWindow):
 
     def _on_finished_file(self, result: PipelineResult) -> None:
         record = result.record
+        self._batch_done += 1
+        self._update_progress()
         self._log(f"  -> {record.status.value}: {record.message}")
         if record.status is ProcessingStatus.COMPLETED:
             self._drop_zone.set_state(
@@ -296,6 +354,8 @@ class MainWindow(QMainWindow):
             self._worker.enqueue(Path(record.stored_path))
 
     def _on_error_file(self, filename: str, message: str) -> None:
+        self._batch_done += 1
+        self._update_progress()
         self._log(f"  -> ERROR {filename}: {message}")
 
     def _show_consent_email(self, record) -> None:

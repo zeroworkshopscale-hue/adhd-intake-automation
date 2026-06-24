@@ -169,7 +169,9 @@ class SignatureValidator:
         if region.width < 20 or region.height < 6:
             return None
         zoom = 300 / 72.0
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=region, alpha=False)
+        # annots=True so a signature drawn as an annotation/appearance (common on
+        # these fillable consent PDFs) is counted, not just page-content ink.
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=region, alpha=False, annots=True)
         if pix.width == 0 or pix.height == 0:
             return None
         arr = np.asarray(

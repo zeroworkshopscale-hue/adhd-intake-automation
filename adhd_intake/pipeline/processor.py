@@ -450,12 +450,20 @@ class IntakeProcessor:
         )
         logger.info("Chart discrepancies for %s: %s", patient.demographic_no, summary)
 
-        approved = False
         try:
-            approved = bool(self.confirm_update(record, discrepancies))
+            decision = self.confirm_update(record, discrepancies)
         except Exception:
             logger.exception("Discrepancy confirmation failed; not updating chart")
-            approved = False
+            decision = []
+
+        # Back-compat: a bool True means "update all"; False/None means none.
+        # Otherwise the operator returns the subset of rows to apply.
+        if decision is True:
+            approved = list(discrepancies)
+        elif not decision:
+            approved = []
+        else:
+            approved = list(decision)
 
         if not approved:
             self._audit.record(
@@ -464,11 +472,15 @@ class IntakeProcessor:
             )
             return
 
-        changes = {d.oscar_field: d.tool_value for d in discrepancies}
+        applied_summary = "; ".join(
+            f"{d.field_label}: '{d.oscar_value}' -> '{d.tool_value}'" for d in approved
+        )
+        changes = {d.oscar_field: d.tool_value for d in approved}
         ok = oscar.update_demographic(patient.demographic_no, changes)
         self._audit.record(
             AuditEvent.PATIENT_MATCHED,
-            f"chart updated: {summary}" if ok else "chart update failed",
+            f"chart updated ({len(approved)}/{len(discrepancies)} field(s)): {applied_summary}"
+            if ok else f"chart update failed for: {applied_summary}",
             record_id=record.id,
         )
 

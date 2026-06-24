@@ -184,6 +184,8 @@ class Extractor:
     ) -> None:
         lowered = {k.lower(): v for k, v in form_values.items()}
         for canonical, candidates in template.demographic_fields.items():
+            if canonical == "pronoun":
+                continue  # handled below from the dedicated option fields
             if getattr(demo, canonical, None):
                 continue
             for label in candidates:
@@ -193,6 +195,16 @@ class Extractor:
                         break
                 if getattr(demo, canonical, None):
                     break
+
+        # Pronoun is encoded as three separate option fields (She/Her, He/His,
+        # They/Them); the marked one carries a value ('x', 'X', '✓', 'On', …).
+        # Read it directly — the text layer lists EVERY option after the
+        # "Pronoun" label, so a text scrape would always grab the first option
+        # (She/Her) regardless of which the patient actually marked.
+        if not demo.pronoun:
+            pron = Extractor._pronoun_from_form_fields(form_values)
+            if pron:
+                demo.pronoun = pron
 
     @staticmethod
     def _collect_label_pairs(pdf_path: Path, template=None) -> dict[str, str]:
@@ -313,13 +325,54 @@ class Extractor:
 
     # Pronoun options in PRIORITY order (He/His wins if several are marked).
     _PRONOUN_OPTIONS = ("He/His", "She/Her", "They/Them")
+    # AcroForm option-field name (letters only) -> canonical pronoun label.
+    _PRONOUN_FIELD_MAP = {
+        "sheher": "She/Her", "shehers": "She/Her",
+        "hehis": "He/His", "hehim": "He/His",
+        "theythem": "They/Them", "theythems": "They/Them",
+    }
+
+    @staticmethod
+    def _pronoun_from_form_fields(form_values: dict) -> Optional[str]:
+        """Pick the marked pronoun from the dedicated AcroForm option fields.
+
+        Matches the field name EXACTLY (letters only) so compound fields such as
+        'SheHer HeHis TheyThemBirthdate yyyymmdd' (a date field that merely starts
+        with the option names) are never mistaken for a pronoun mark.
+        """
+        import re as _re
+
+        marked: set[str] = set()
+        for name, value in (form_values or {}).items():
+            key = _re.sub(r"[^a-z]", "", str(name).lower())
+            option = Extractor._PRONOUN_FIELD_MAP.get(key)
+            if option is None:
+                continue
+            v = str(value or "").strip().lower()
+            if v and v not in ("off", "no", "false", "0", "unchecked", "none"):
+                marked.add(option)
+        for option in Extractor._PRONOUN_OPTIONS:  # priority order
+            if option in marked:
+                return option
+        return None
 
     @staticmethod
     def _detect_pronoun(page) -> Optional[str]:
-        """Return the selected pronoun (mark to the left of the option), giving
-        priority to He/His when more than one is marked."""
+        """Return the selected pronoun, giving priority to He/His when more than
+        one is marked. Prefers the AcroForm option fields (exact, no guessing);
+        falls back to a mark/ink to the LEFT of the option for flattened forms."""
         import re as _re
 
+        # 1) AcroForm widgets are authoritative.
+        widget_values = {
+            (w.field_name or ""): (w.field_value or "")
+            for w in (page.widgets() or [])
+        }
+        pron = Extractor._pronoun_from_form_fields(widget_values)
+        if pron:
+            return pron
+
+        # 2) Flattened / scanned form: look for a real mark or ink to the left.
         words = page.get_text("words")  # (x0,y0,x1,y1,text,...)
         for option in Extractor._PRONOUN_OPTIONS:
             rects = page.search_for(option)
@@ -328,10 +381,12 @@ class Extractor:
             r = rects[0]
             cy = (r.y0 + r.y1) / 2
             # A mark token (x / X / ✓ / etc.) just left of the option, same row.
+            # NOTE: only genuine mark glyphs count — a generic "short token"
+            # heuristic falsely marked any 1-2 char fragment beside an option.
             for x0, y0, x1, y1, t, *_ in words:
                 if x1 <= r.x0 and x0 >= r.x0 - 60 and abs((y0 + y1) / 2 - cy) <= 8:
                     s = t.strip()
-                    if s and (_re.fullmatch(r"[xX✓√✔✗✘●•\*]+", s) or len(s) <= 2):
+                    if s and _re.fullmatch(r"[xX✓√✔✗✘●•\*]+", s):
                         return option
             # Fallback: ink (a drawn mark) just left of the option.
             if Extractor._region_has_ink(page, r.x0 - 48, r.y0 - 2, r.x0 - 3, r.y1 + 2):

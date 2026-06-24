@@ -33,7 +33,7 @@ validation:
   # A missing signature does NOT block processing -- the form is still uploaded
   # and the status is set to Completed - Signature Missing on Consent Form.
   # Calibrate with: python tools/calibrate_signature.py --signed a.pdf --unsigned b.pdf
-  min_ink_density: 0.05
+  min_ink_density: 0.04
   consent_keywords:
     - "consent"
     - "signature"
