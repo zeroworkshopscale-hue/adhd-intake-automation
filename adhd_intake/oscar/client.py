@@ -96,11 +96,15 @@ class OscarSelectors:
         "button:has-text('Login'), button:has-text('Enter')"
     )
     # Marker visible AFTER successful login (before: login form is shown).
+    # NOTE: this is a single CSS-engine selector list, so the text clauses must
+    # use Playwright's ``:has-text()`` CSS pseudo — a bare ``text=`` engine prefix
+    # cannot be mixed into a comma list and makes the CSS parser throw
+    # "Unexpected token '='".
     login_success_marker: str = (
         "nav, "
         "[class*='nav-'], [class*='sidebar'], [class*='dashboard'], "
         "[class*='schedule'], [class*='menu'], "
-        "text=Schedule, text=Patient Search, text=Inbox"
+        "a:has-text('Schedule'), a:has-text('Patient Search'), a:has-text('Inbox')"
     )
 
     # --- classic OSCAR Pro endpoints (accessed after Angular login) ---
