@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
         self._worker.finished_file.connect(self._on_finished_file)
         self._worker.error_file.connect(self._on_error_file)
         self._worker.confirm_update_requested.connect(self._on_confirm_update)
+        self._worker.incomplete_requested.connect(self._on_incomplete_decision)
         self._worker.select_patient_requested.connect(self._on_select_patient)
         self._worker.email_requested.connect(self._on_ask_email)
         self._worker.idle.connect(lambda: self.statusBar().showMessage("Idle"))
@@ -205,6 +206,11 @@ class MainWindow(QMainWindow):
         from .consent_email import ConsentEmailDialog, build_incomplete_email
 
         first = record.demographics.first_name
+        questions = list(getattr(record, "incomplete_questions", []) or [])
+        listed = (
+            "\nUnanswered questions:\n" + "\n".join(f"  - {q}" for q in questions)
+            if questions else ""
+        )
         dlg = ConsentEmailDialog(
             first_name=first,
             patient_email=record.demographics.email,
@@ -216,10 +222,31 @@ class MainWindow(QMainWindow):
                 f"The form '{record.source_filename}' had unanswered sections{' on ' + pages_label if pages_label else ''}.\n"
                 "It was uploaded to OSCAR as 'ADHD Assessment Tool - Incomplete'.\n"
                 "Copy the email below and send it to the patient from Outlook."
+                + listed
             ),
-            body_text=build_incomplete_email(first, pages_label or "some pages"),
+            body_text=build_incomplete_email(first, pages_label or "some pages", questions),
         )
         dlg.exec()
+
+    def _on_incomplete_decision(self, record, completeness) -> None:
+        """Notify the operator of the empty rows/sections and let them choose to
+        process the form as complete or send it back to the patient."""
+        from .incomplete_dialog import IncompleteFormDialog
+
+        process_as_complete = IncompleteFormDialog.ask(
+            record.patient_name() or record.source_filename, completeness, parent=self
+        )
+        if process_as_complete:
+            self._log(
+                f"  Incomplete form for {record.patient_name()}: operator chose to "
+                f"process as COMPLETE ({completeness.unanswered_count} blank row(s))."
+            )
+        else:
+            self._log(
+                f"  Incomplete form for {record.patient_name()}: sending back to patient "
+                f"({completeness.unanswered_count} blank row(s))."
+            )
+        self._worker.provide_incomplete_decision(process_as_complete)
 
     def _on_confirm_update(self, record, discrepancies) -> None:
         """Show the red Alert dialog and return the decision to the worker.

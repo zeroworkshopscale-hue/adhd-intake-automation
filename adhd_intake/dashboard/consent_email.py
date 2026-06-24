@@ -38,7 +38,7 @@ _INCOMPLETE_TEMPLATE = (
     "Thank you for submitting your ADHD Assessment Tool.\n\n"
     "While reviewing it we noticed that some questions were left unanswered{pages}. "
     "Each question needs a response so that your assessment can be completed "
-    "accurately.\n\n"
+    "accurately.{questions}\n\n"
     "Please review the form, complete the missing sections, and send the updated "
     "copy back to us at your earliest convenience.\n\n"
     "Best regards,\n"
@@ -52,11 +52,25 @@ def build_consent_email(first_name: Optional[str]) -> str:
     return _EMAIL_TEMPLATE.format(name=name)
 
 
-def build_incomplete_email(first_name: Optional[str], pages_label: str = "") -> str:
-    """Return the incomplete-sections follow-up email body."""
+def build_incomplete_email(
+    first_name: Optional[str],
+    pages_label: str = "",
+    questions: Optional[list] = None,
+) -> str:
+    """Return the incomplete-sections follow-up email body.
+
+    When the specific unanswered questions are known they are listed so the
+    patient knows exactly what to complete.
+    """
     name = (first_name or "").strip() or "Patient"
     pages = f" (on {pages_label})" if pages_label else ""
-    return _INCOMPLETE_TEMPLATE.format(name=name, pages=pages)
+    questions_block = ""
+    if questions:
+        bullets = "\n".join(f"  - {q}" for q in questions)
+        questions_block = (
+            "\n\nThe following still need an answer:\n" + bullets
+        )
+    return _INCOMPLETE_TEMPLATE.format(name=name, pages=pages, questions=questions_block)
 
 
 class ConsentEmailDialog(AnimatedDialog):

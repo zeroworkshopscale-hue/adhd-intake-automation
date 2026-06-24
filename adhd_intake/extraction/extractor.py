@@ -100,6 +100,18 @@ class Extractor:
         if not demographics.has_minimum_identifiers():
             warnings.append("Insufficient demographic identifiers extracted.")
 
+        # Special multi-cell sections (substance use, how-did-you-hear, consent)
+        # are spread across the form and need widget + ink detection, so compute
+        # them here for fillable AND flattened PDFs and expose one answer key per
+        # output column. Pronoun is promoted onto the answers map too so the sheet
+        # can reference it by name.
+        if demographics.pronoun and not answers.get("pronoun"):
+            answers["pronoun"] = demographics.pronoun
+        try:
+            self._extract_special_sections(pdf_path, answers)
+        except Exception:
+            logger.debug("Special-section extraction failed", exc_info=True)
+
         if answers:
             logger.info("Extracted field keys (%d): %s",
                         len(answers), " | ".join(sorted(answers.keys()))[:600])
@@ -392,6 +404,102 @@ class Extractor:
             if Extractor._region_has_ink(page, r.x0 - 48, r.y0 - 2, r.x0 - 3, r.y1 + 2):
                 return option
         return None
+
+    # ------------------------------------------------------------------
+    # Special multi-cell sections: substance use, how-did-you-hear, consent.
+    # Each is exposed as one answer key per output column so the copy sheet can
+    # place every selection in its own cell.
+    # ------------------------------------------------------------------
+    _REFERRAL_LABEL_CLEAN = {"Online search eg Google": "Online search"}
+
+    @staticmethod
+    def _is_marked(value) -> bool:
+        v = str(value or "").strip().lower()
+        return v not in ("", "off", "no", "0", "false", "unchecked", "none")
+
+    def _extract_special_sections(self, pdf_path: Path, answers: dict) -> None:
+        import fitz
+
+        with fitz.open(str(pdf_path)) as doc:
+            for page in doc:
+                low = page.get_text("text").lower()
+                if "alcohol" in low and "cannabis" in low and "substance_alcohol" not in answers:
+                    self._detect_substances(page, answers)
+                if "how did you hear" in low and "referral_1" not in answers:
+                    self._detect_referral_columns(page, answers)
+                if (
+                    ("future adhd initiatives" in low or "future research" in low)
+                    and "future_initiatives" not in answers
+                ):
+                    self._detect_consent_checkboxes(page, answers)
+
+    @staticmethod
+    def _detect_substances(page, answers: dict) -> None:
+        """Per-substance Yes/No -> one column each: the substance name when the
+        patient ticked 'Yes', blank otherwise."""
+        mapping = [
+            ("Alcohol", "substance_alcohol", "Alcohol"),
+            ("Cannabis", "substance_cannabis", "Cannabis"),
+            ("Other substances", "substance_other", "Other substance"),
+        ]
+        widgets = list(page.widgets() or [])
+        selected: list[str] = []
+        for label, key, value in mapping:
+            rects = page.search_for(label)
+            yes = False
+            if rects:
+                ry = rects[0].y0
+                # The Yes/No checkboxes sit on the label's row, left of mid-page.
+                row = [
+                    w for w in widgets
+                    if abs(w.rect.y0 - ry) <= 10 and w.rect.x0 < 360
+                    and (w.rect.x1 - w.rect.x0) < 40
+                ]
+                row.sort(key=lambda w: w.rect.x0)   # [No (left), Yes (right)]
+                if len(row) >= 2:
+                    yes = Extractor._is_marked(row[-1].field_value)
+            answers[key] = value if yes else ""
+            if yes:
+                selected.append(value)
+        answers["substance_use"] = ", ".join(selected)
+
+    @staticmethod
+    def _detect_referral_columns(page, answers: dict) -> None:
+        """Up to three selected 'How did you hear about us?' options, in order,
+        one per column (referral_1/2/3)."""
+        sel: list[tuple[float, str]] = []
+        for w in page.widgets() or []:
+            r = w.rect
+            if r.x0 < 100 and 6 < (r.x1 - r.x0) < 35 and Extractor._is_marked(w.field_value):
+                sel.append((r.y0, w.field_name or ""))
+        sel.sort()
+        labels: list[str] = []
+        for _, name in sel:
+            lbl = Extractor._REFERRAL_LABEL_CLEAN.get(name, name)
+            if lbl.lower().endswith(" name"):
+                lbl = lbl[:-5]
+            labels.append(lbl.strip())
+        for i in range(3):
+            answers[f"referral_{i + 1}"] = labels[i] if i < len(labels) else ""
+        if labels:
+            answers["referral_source"] = ", ".join(labels)
+
+    @staticmethod
+    def _detect_consent_checkboxes(page, answers: dict) -> None:
+        """The two e-mail consent checkboxes are drawn boxes (no form field), so
+        detect a mark by ink. 'Yes' when ticked, otherwise 'No'."""
+        for key, anchor in (
+            ("future_initiatives", "future ADHD initiatives"),
+            ("future_research", "future research"),
+        ):
+            rects = page.search_for(anchor)
+            marked = False
+            if rects:
+                try:
+                    marked = Extractor._checkbox_marked(page, rects[0])
+                except Exception:
+                    marked = False
+            answers[key] = "Yes" if marked else "No"
 
     @staticmethod
     def _region_has_ink(page, x0, y0, x1, y1, threshold: float = 0.02) -> bool:

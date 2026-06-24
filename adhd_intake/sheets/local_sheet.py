@@ -90,13 +90,21 @@ LOCAL_SHEET_HEADERS = [h for h, _ in DEFAULT_COLUMNS]
 class LocalSheetWriter:
     """Append-only CSV writer with a configurable column schema."""
 
+    # Columns never filled with the blank placeholder: pure spacers, and the
+    # how-did-you-hear option slots (which legitimately stay empty when the
+    # patient selected fewer than three options).
+    _NO_PLACEHOLDER_FIELDS = ("blank",)
+    _NO_PLACEHOLDER_PREFIXES = ("form:referral",)
+
     def __init__(
         self,
         path: Path,
         columns: Sequence[tuple[str, str]] | None = None,
+        blank_placeholder: str = "",
     ):
         self._path = path
         self._columns = tuple(columns) if columns else DEFAULT_COLUMNS
+        self._blank_placeholder = blank_placeholder or ""
         # Validate field keys early so a config typo fails loudly at start-up.
         # A "form:<field name>" key pulls a raw questionnaire answer by name.
         for _, field_key in self._columns:
@@ -116,6 +124,16 @@ class LocalSheetWriter:
     def headers(self) -> list[str]:
         return [h for h, _ in self._columns]
 
+    def _placeholder_for(self, field_key: str) -> str:
+        """The text used when a column resolves empty (blank for exempt cols)."""
+        if not self._blank_placeholder:
+            return ""
+        if field_key in self._NO_PLACEHOLDER_FIELDS:
+            return ""
+        if any(field_key.startswith(p) for p in self._NO_PLACEHOLDER_PREFIXES):
+            return ""
+        return self._blank_placeholder
+
     def _row(self, record: ProcessingRecord) -> list[str]:
         cells: list[str] = []
         for _, field_key in self._columns:
@@ -129,9 +147,10 @@ class LocalSheetWriter:
                     if v:
                         value = v
                         break
-                cells.append(value)
+                cells.append(value or self._placeholder_for(field_key))
             else:
-                cells.append(FIELD_RESOLVERS[field_key](record))
+                value = FIELD_RESOLVERS[field_key](record)
+                cells.append(value or self._placeholder_for(field_key))
         return cells
 
     def append_record(self, record: ProcessingRecord) -> int:

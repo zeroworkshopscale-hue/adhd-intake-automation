@@ -23,7 +23,11 @@ class CompositeSheetWriter:
     def __init__(self, config: SheetsConfig):
         self._config = config
         self._local: Optional[LocalSheetWriter] = (
-            LocalSheetWriter(config.local_path, columns=config.columns or None)
+            LocalSheetWriter(
+                config.local_path,
+                columns=config.columns or None,
+                blank_placeholder=config.blank_placeholder,
+            )
             if config.local_enabled
             else None
         )

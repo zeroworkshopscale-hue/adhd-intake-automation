@@ -51,7 +51,8 @@ class CompletenessValidator:
 
         start, end = template.validation_pages
         incomplete_pages: list[int] = []
-        total_unanswered = 0
+        unanswered_questions: list[str] = []
+        blank_section_pages: list[int] = []
         parsed_any = False
 
         try:
@@ -68,10 +69,13 @@ class CompletenessValidator:
                         unanswered = None
                     if unanswered is None:
                         continue
+                    labels, total_rows = unanswered
                     parsed_any = True
-                    if unanswered > 0:
+                    if labels:
                         incomplete_pages.append(page_no)
-                        total_unanswered += unanswered
+                        unanswered_questions.extend(f"Page {page_no}: {q}" for q in labels)
+                        if total_rows > 0 and len(labels) >= total_rows:
+                            blank_section_pages.append(page_no)
         except Exception:
             logger.exception("Completeness validation could not open %s", pdf_path)
             return CompletenessResult(
@@ -88,26 +92,47 @@ class CompletenessValidator:
         detail = (
             "all question rows have a response"
             if complete
-            else f"{total_unanswered} unanswered question row(s) on {len(incomplete_pages)} page(s)"
+            else f"{len(unanswered_questions)} unanswered question row(s) on "
+                 f"{len(incomplete_pages)} page(s): " + "; ".join(unanswered_questions)
         )
         return CompletenessResult(
             complete=complete,
             incomplete_pages=incomplete_pages,
-            unanswered_count=total_unanswered,
+            unanswered_count=len(unanswered_questions),
+            unanswered_questions=unanswered_questions,
+            blank_section_pages=blank_section_pages,
             checked=True,
             detail=detail,
         )
 
     # ------------------------------------------------------------------
-    def _check_page(self, page, template, page_no: int = 0) -> Optional[int]:
-        """Return the count of unanswered rows, or None if no grid is found."""
+    def _check_page(self, page, template, page_no: int = 0) -> Optional[tuple[list[str], int]]:
+        """Return (unanswered question labels, total question rows), or None if
+        no grid is found on the page."""
         result = self._check_page_widgets(page)
         if result is not None:
             return result
         return self._check_page_ink(page, template, page_no)
 
+    @staticmethod
+    def _row_label(page, y0: float, y1: float, x_max: float) -> str:
+        """Read the question text (left of the response band) for a row, e.g.
+        '6 I am late for class.' — used to name an unanswered question.
+
+        Collects every word on the row's own text line (the number and the
+        question text are separate PDF groups), so an adjacent question on the
+        line below is never folded in.
+        """
+        near = [
+            (wx0, wd)
+            for wx0, wy0, wx1, wy1, wd, *_ in page.get_text("words")
+            if wx1 <= x_max + 2 and (y0 - 6) <= wy0 <= (y0 + 8)
+        ]
+        near.sort(key=lambda t: t[0])
+        return " ".join(w for _, w in near).strip()[:120]
+
     # --- 1) authoritative: AcroForm field values ----------------------
-    def _check_page_widgets(self, page) -> Optional[int]:
+    def _check_page_widgets(self, page) -> Optional[tuple[list[str], int]]:
         import fitz
 
         widgets = list(page.widgets() or [])
@@ -115,35 +140,38 @@ class CompletenessValidator:
             return None
 
         x_min = page.rect.width * 0.42
-        cells: list[tuple[float, float, bool]] = []
+        cells: list[tuple[float, float, float, bool]] = []
         for w in widgets:
             r = w.rect
             if r.x0 < x_min:
                 continue
-            cells.append((r.y0, r.x0, self._widget_filled(w)))
+            cells.append((r.y0, r.y1, r.x0, self._widget_filled(w)))
         if len(cells) < 4:
             return None
 
         cells.sort(key=lambda c: c[0])
-        rows: list[list[tuple[float, float, bool]]] = [[cells[0]]]
+        rows: list[list[tuple[float, float, float, bool]]] = [[cells[0]]]
         for c in cells[1:]:
             if c[0] - rows[-1][0][0] <= 7.0:
                 rows[-1].append(c)
             else:
                 rows.append([c])
 
-        unanswered = 0
+        unanswered: list[str] = []
         real_rows = 0
         for row in rows:
             if len(row) < 2:
                 continue
             real_rows += 1
-            if not any(filled for _, _, filled in row):
-                unanswered += 1
-                logger.debug("unanswered widget row y=%.0f (%d cols)", row[0][0], len(row))
+            if not any(filled for _, _, _, filled in row):
+                ry0 = min(c[0] for c in row)
+                ry1 = max(c[1] for c in row)
+                label = self._row_label(page, ry0, ry1, x_min) or f"question row at y={int(ry0)}"
+                unanswered.append(label)
+                logger.debug("unanswered widget row y=%.0f (%d cols): %s", ry0, len(row), label)
         if real_rows == 0:
             return None
-        return unanswered
+        return unanswered, real_rows
 
     @staticmethod
     def _widget_filled(w) -> bool:
@@ -155,7 +183,7 @@ class CompletenessValidator:
         return bool(val)
 
     # --- 2) fallback: ink measurement (scanned / flattened forms) -----
-    def _check_page_ink(self, page, template, page_no: int = 0) -> Optional[int]:
+    def _check_page_ink(self, page, template, page_no: int = 0) -> Optional[tuple[list[str], int]]:
         """Return the count of unanswered question rows, or None if no grid found.
 
         Adaptive thresholds: pages 8 and beyond often have lighter printing, so
@@ -205,7 +233,7 @@ class CompletenessValidator:
 
         n_rows, n_cols = len(rows), len(centers)
         ink = np.zeros((n_rows, n_cols), dtype=float)
-        for ri, (ry0, ry1) in enumerate(rows):
+        for ri, (ry0, ry1, _txt) in enumerate(rows):
             py0 = max(0, to_px_y(ry0))
             py1 = min(h_px, to_px_y(ry1))
             if py1 - py0 < 2:
@@ -237,7 +265,7 @@ class CompletenessValidator:
             page_no, n_rows, n_cols, baseline, min_ink, page_factor, margin,
         )
 
-        unanswered = 0
+        unanswered: list[str] = []
         for ri in range(n_rows):
             row_ink = ink[ri]
 
@@ -267,13 +295,14 @@ class CompletenessValidator:
                 if row_density >= row_wide_threshold:
                     continue
 
-            unanswered += 1
+            label = (rows[ri][2] or "").strip()[:120] or f"question row at y={int(rows[ri][0])}"
+            unanswered.append(label)
             logger.info(
-                "  UNANSWERED: page %d row %d y=%.0f ink=%s",
-                page_no, ri, rows[ri][0],
+                "  UNANSWERED: page %d row %d y=%.0f (%s) ink=%s",
+                page_no, ri, rows[ri][0], label,
                 "[" + " ".join(f"{v:.4f}" for v in row_ink) + "]",
             )
-        return unanswered
+        return unanswered, n_rows
 
     # ------------------------------------------------------------------
     def _response_column_centers(self, page, template) -> list[float]:
@@ -301,7 +330,7 @@ class CompletenessValidator:
         return [sum(c) / len(c) for c in clusters]
 
     @staticmethod
-    def _question_rows(page, band_left: float) -> list[tuple[float, float]]:
+    def _question_rows(page, band_left: float) -> list[tuple[float, float, str]]:
         groups: dict = defaultdict(list)
         for x0, y0, x1, y1, word, block, line, _wno in page.get_text("words"):
             groups[(block, line)].append((x0, y0, x1, y1, word))
@@ -315,19 +344,20 @@ class CompletenessValidator:
             ly1 = max(w[3] for w in ws)
             letters = sum(ch.isalpha() for ch in text)
             if lx0 < band_left - 6 and len(text) >= 12 and letters >= 8:
-                lines.append((ly0, ly1))
+                lines.append((ly0, ly1, text))
         if not lines:
             return []
         lines.sort()
 
-        heights = sorted(b - a for a, b in lines if b > a)
+        heights = sorted(b - a for a, b, _t in lines if b > a)
         h = heights[len(heights) // 2] if heights else 12.0
         merge_gap = 0.5 * h
 
-        merged: list[list[float]] = [list(lines[0])]
-        for y0, y1 in lines[1:]:
+        merged: list[list] = [list(lines[0])]
+        for y0, y1, text in lines[1:]:
             if y0 - merged[-1][1] <= merge_gap:
                 merged[-1][1] = max(merged[-1][1], y1)
+                merged[-1][2] = (merged[-1][2] + " " + text).strip()
             else:
-                merged.append([y0, y1])
-        return [(a, b) for a, b in merged]
+                merged.append([y0, y1, text])
+        return [(a, b, t) for a, b, t in merged]

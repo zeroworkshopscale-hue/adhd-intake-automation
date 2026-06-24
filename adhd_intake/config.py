@@ -135,6 +135,10 @@ class SheetsConfig:
     # Ordered (header, field_key) pairs for the local copy sheet. Empty -> the
     # default schema in adhd_intake.sheets.local_sheet.DEFAULT_COLUMNS.
     columns: tuple[tuple[str, str], ...] = ()
+    # When a cell resolves empty it is filled with this text (e.g. "NA"). Empty
+    # string keeps cells blank. Pure spacer columns (field: blank) and the
+    # how-did-you-hear option slots are never filled.
+    blank_placeholder: str = ""
     service_account_file: Optional[Path] = None
     spreadsheet_id: str = ""
     worksheet_name: str = "Intake Log"
@@ -264,6 +268,7 @@ class AppConfig:
                 ),
                 reset_each_session=bool(sheets_raw.get("reset_each_session", True)),
                 columns=columns,
+                blank_placeholder=str(sheets_raw.get("blank_placeholder", "")),
                 service_account_file=_resolve(sa_file) if sa_file else None,
                 spreadsheet_id=sheets_raw.get("spreadsheet_id", ""),
                 worksheet_name=sheets_raw.get("worksheet_name", "Intake Log"),

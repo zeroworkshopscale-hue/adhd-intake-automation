@@ -108,6 +108,12 @@ class IntakeProcessor:
         self.confirm_update: Callable[[ProcessingRecord, list], bool] = (
             confirm_update or (lambda record, discrepancies: False)
         )
+        # Called when a form has unanswered rows; returns True to process it as a
+        # COMPLETE form anyway, False to flag it incomplete and email the patient.
+        # Default (headless): False -> flag incomplete (the safe choice).
+        self.confirm_incomplete: Callable[[ProcessingRecord, object], bool] = (
+            lambda record, completeness: False
+        )
         # Interactive match helpers (set by the GUI worker). Headless -> None,
         # so auto-matching alone is used.
         self.select_patient = None   # (candidates: list[dict]) -> demographic_no | None
@@ -311,12 +317,33 @@ class IntakeProcessor:
                     AuditEvent.COMPLETENESS_CHECKED, completeness.detail, record_id=record.id
                 )
             if completeness.checked and not completeness.complete:
-                _form_incomplete = True
-                self._audit.record(
-                    AuditEvent.COMPLETENESS_INCOMPLETE,
-                    f"unanswered on {completeness.pages_label} — uploading with incomplete description",
-                    record_id=record.id,
+                questions_label = (
+                    "; ".join(completeness.unanswered_questions)
+                    or completeness.pages_label
                 )
+                # Ask the operator: process as a complete form, or send it back to
+                # the patient? Default (headless) is to flag it incomplete.
+                process_as_complete = False
+                try:
+                    process_as_complete = bool(self.confirm_incomplete(record, completeness))
+                except Exception:
+                    logger.exception("Incomplete-form decision failed; flagging incomplete")
+                    process_as_complete = False
+
+                if process_as_complete:
+                    self._audit.record(
+                        AuditEvent.COMPLETENESS_CHECKED,
+                        f"operator processed as COMPLETE despite unanswered: {questions_label}",
+                        record_id=record.id,
+                    )
+                else:
+                    _form_incomplete = True
+                    record.incomplete_questions = list(completeness.unanswered_questions)
+                    self._audit.record(
+                        AuditEvent.COMPLETENESS_INCOMPLETE,
+                        f"operator requested patient completion; unanswered: {questions_label}",
+                        record_id=record.id,
+                    )
 
         # ---- 3. Find patient in OSCAR ----
         if not record.demographics.has_minimum_identifiers():
@@ -411,7 +438,11 @@ class IntakeProcessor:
         # ---- 6. Done ----
         if _form_incomplete:
             record.status = ProcessingStatus.INCOMPLETE_PATIENT_INFORMED
-            record.message = "Uploaded to OSCAR as incomplete — email patient to complete missing sections."
+            missing = "; ".join(record.incomplete_questions)
+            record.message = (
+                "Uploaded to OSCAR as incomplete — email patient to complete missing sections."
+                + (f" Unanswered: {missing}" if missing else "")
+            )
         elif record.signature_present is False:
             record.status = ProcessingStatus.COMPLETED_NO_SIGNATURE
             record.message = "Uploaded to OSCAR — consent signature missing on form."

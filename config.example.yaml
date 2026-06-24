@@ -91,31 +91,37 @@ sheets:
   # Wipe the local CSV on each new session (recommended: true).
   reset_each_session: true
 
+  # Empty cells are filled with this text (except spacer + how-did-you-hear
+  # columns). Set to "" to leave blanks empty.
+  blank_placeholder: "NA"
+
   # Column order must match your master Google Sheet so rows paste in aligned.
   # field options: blank, date, datetime, demographic_no, email, first_name,
   #   last_name, full_name, dob, age, phone, health_card, pronoun,
   #   questionnaire_type, signature, status, oscar_document_id, source_filename,
   #   program_status, province, referral_source
-  # Use form:<PDF field name> to pull a raw questionnaire answer.
+  # Use form:<PDF field name> to pull a raw questionnaire answer. Computed keys:
+  #   substance_alcohol/substance_cannabis/substance_other, referral_1/2/3,
+  #   future_initiatives, future_research, pronoun.
   columns:
-    - {header: "MSP/ Private3",           field: program_status}
-    - {header: "Date",                    field: date}
-    - {header: "Demographic number",      field: demographic_no}
-    - {header: "Email Address",           field: email}
-    - {header: "Pronoun",                 field: "form:pronoun"}
-    - {header: "Age",                     field: age}
-    - {header: "Student - list program",  field: "form:Current Program"}
-    - {header: "List Employment",         field: "form:Current Occupation|PartTime FullTimeCurrent Occupation"}
-    - {header: "Substance Use?",          field: "form:substance_use"}
-    - {header: "",                        field: blank}
-    - {header: "",                        field: blank}
-    - {header: "",                        field: blank}
-    - {header: "How did they hear about us?", field: referral_source}
-    - {header: "",                        field: blank}
-    - {header: "Coach/Doctor/Counsellor Name", field: "form:Doctor (name):|Counsellor (name):|Coach (name):"}
-    - {header: "Future initiatives?",     field: "form:future_initiatives"}
-    - {header: "Future research?",        field: "form:future_research"}
-    - {header: "Province",                field: province}
+    - {header: "MSP/ Private3",           field: program_status}        # A
+    - {header: "Date",                    field: date}                  # B
+    - {header: "Demographic number",      field: demographic_no}        # C
+    - {header: "Email Address",           field: email}                 # D
+    - {header: "Pronoun",                 field: pronoun}               # E
+    - {header: "Age",                     field: age}                   # F
+    - {header: "Student - list program",  field: "form:Current Program"}# G
+    - {header: "List Employment",         field: "form:Current Occupation|PartTime FullTimeCurrent Occupation"}  # H
+    - {header: "Substance - Alcohol",     field: "form:substance_alcohol"}   # I
+    - {header: "Substance - Cannabis",    field: "form:substance_cannabis"}  # J
+    - {header: "Substance - Other",       field: "form:substance_other"}     # K
+    - {header: "",                        field: blank}                 # L
+    - {header: "How did you hear (1)",    field: "form:referral_1"}     # M
+    - {header: "How did you hear (2)",    field: "form:referral_2"}     # N
+    - {header: "How did you hear (3)",    field: "form:referral_3"}     # O
+    - {header: "Future initiatives?",     field: "form:future_initiatives"}  # P
+    - {header: "Future research?",        field: "form:future_research"}     # Q
+    - {header: "Province",                field: province}              # R
 
   # Only needed when mode is google or both:
   service_account_file: "./secrets/google_service_account.json"

@@ -239,6 +239,11 @@ class CompletenessResult:
     complete: bool
     incomplete_pages: list[int] = field(default_factory=list)  # 1-based page numbers
     unanswered_count: int = 0
+    # Human-readable description of each unanswered question, e.g.
+    # "Page 10: 6 I am late for class." — surfaced to staff and the patient email.
+    unanswered_questions: list[str] = field(default_factory=list)
+    # Pages where EVERY question row is blank (a whole section left empty).
+    blank_section_pages: list[int] = field(default_factory=list)
     checked: bool = True       # False if the page structure could not be parsed
     detail: str = ""
 
@@ -309,6 +314,9 @@ class ProcessingRecord:
     # In-memory only (not persisted): raw questionnaire field values, so the
     # copy-sheet can pull arbitrary answers via "form:<field name>" columns.
     answers: dict = field(default_factory=dict)
+    # In-memory only: specific unanswered questions when a form is incomplete,
+    # so the activity log and patient email can name exactly what to complete.
+    incomplete_questions: list = field(default_factory=list)
 
     def patient_email(self) -> str:
         return self.demographics.email or ""
