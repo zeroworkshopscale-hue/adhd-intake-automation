@@ -132,24 +132,121 @@ class IntakeProcessor:
         except OSError as exc:
             return self._fail(record, f"Cannot read file: {exc}")
 
-        # Note (don't block) if we've seen this exact file before. Re-dropping a
-        # file re-processes it; we just record the prior match for the audit log.
+        # Have we already uploaded this exact file to OSCAR before? If so, do NOT
+        # create a second document. Re-dropping the file becomes the recovery
+        # action: skip OSCAR entirely and just write the sheet row if the earlier
+        # run never got that far (e.g. it errored after the upload).
         existing = self._repo.find_by_hash(record.file_hash)
 
         self._repo.insert(record)
-        if existing and existing.status is ProcessingStatus.COMPLETED:
+        self._audit.record(AuditEvent.FILE_RECEIVED, pdf_path.name, record_id=record.id)
+
+        if existing is not None and existing.oscar_document_id:
             self._audit.record(
                 AuditEvent.DUPLICATE_DETECTED,
-                f"re-processing; hash matches earlier record {existing.id}",
+                f"hash matches record {existing.id}, already uploaded as OSCAR "
+                f"document {existing.oscar_document_id}; skipping OSCAR upload",
                 record_id=record.id,
             )
-        self._audit.record(AuditEvent.FILE_RECEIVED, pdf_path.name, record_id=record.id)
+            try:
+                return self._handle_existing_upload(record, existing, pdf_path)
+            except Exception as exc:  # last-resort guard
+                logger.exception("Duplicate handling failed for %s", pdf_path.name)
+                return self._fail(record, f"Unexpected error: {exc}")
 
         try:
             return self._run_stages(record, pdf_path)
         except Exception as exc:  # last-resort guard
             logger.exception("Unhandled error processing %s", pdf_path.name)
             return self._fail(record, f"Unexpected error: {exc}")
+
+    # ------------------------------------------------------------------
+    def _handle_existing_upload(
+        self, record: ProcessingRecord, existing: ProcessingRecord, pdf_path: Path
+    ) -> PipelineResult:
+        """Re-drop of a file that was already uploaded to OSCAR.
+
+        The document is already in the chart, so we must not upload a second
+        copy. Reuse the prior OSCAR linkage and, if the earlier run never reached
+        the sheet (for example it errored at the Sheets step), write the missing
+        row now. This makes simply re-dropping the file the way to recover a
+        half-finished upload — no OSCAR contact required.
+        """
+        record.demographic_no = existing.demographic_no
+        record.oscar_document_id = existing.oscar_document_id
+        record.signature_present = existing.signature_present
+
+        # Re-extract locally (no OSCAR) so the sheet row carries the names and
+        # answers; ``answers`` are in-memory only and can't come from the DB.
+        try:
+            extraction = self._extractor.extract(pdf_path)
+            record.questionnaire_type = extraction.questionnaire_type
+            record.pdf_kind = extraction.pdf_kind
+            record.used_ocr = extraction.used_ocr
+            record.demographics = extraction.demographics
+            record.answers = extraction.answers
+        except Exception:
+            logger.exception("Re-extraction failed on duplicate; using stored demographics")
+            record.demographics = existing.demographics
+        # The OSCAR chart email captured on the first run beats a blank form.
+        if not record.demographics.email and existing.demographics.email:
+            record.demographics.email = existing.demographics.email
+
+        # Preserve the earlier completion meaning (incomplete / signature missing).
+        final_status = (
+            existing.status if existing.status.is_success else ProcessingStatus.COMPLETED
+        )
+
+        if existing.sheets_row is not None:
+            # Already uploaded AND already on the sheet: genuinely nothing to do.
+            record.sheets_row = existing.sheets_row
+            record.status = final_status
+            record.message = (
+                f"Already uploaded to OSCAR (document {existing.oscar_document_id}) and "
+                "already recorded on the sheet — skipped to avoid a duplicate."
+            )
+            self._repo.update(record)
+            self._audit.record(
+                AuditEvent.COMPLETED,
+                "duplicate skipped (already uploaded and on sheet)",
+                record_id=record.id,
+            )
+        else:
+            # Uploaded before but the sheet row is missing — write it now.
+            record.status = ProcessingStatus.UPLOADING
+            self._repo.update(record)
+            try:
+                sheets = self._sheets_factory()
+                row = sheets.append_record(record)
+                record.sheets_row = row
+                self._repo.update(record)
+                self._audit.record(
+                    AuditEvent.SHEET_UPDATED,
+                    f"row {row} (recovery; OSCAR upload skipped — already uploaded)",
+                    record_id=record.id,
+                )
+            except Exception as exc:
+                logger.exception("Sheets recovery write failed")
+                return self._fail(
+                    record,
+                    f"Already in OSCAR (document {existing.oscar_document_id}) but the "
+                    f"sheet row still could not be written: {exc}",
+                )
+            record.status = final_status
+            record.message = (
+                f"Already in OSCAR (document {existing.oscar_document_id}); skipped the "
+                "duplicate upload and added the missing sheet row."
+            )
+
+        moved = safe_move(pdf_path, self._config.folders.processed)
+        record.stored_path = str(moved)
+        self._repo.update(record)
+        self._audit.record(AuditEvent.COMPLETED, str(moved), record_id=record.id)
+        logger.info(
+            "Duplicate of %s -> reused OSCAR document %s",
+            record.source_filename, record.oscar_document_id,
+        )
+        return PipelineResult(record, record.status, record.message)
 
     # ------------------------------------------------------------------
     def _run_stages(self, record: ProcessingRecord, pdf_path: Path) -> PipelineResult:

@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- Duplicate-upload guard: re-dropping a file that was already uploaded to OSCAR
+  no longer creates a second document. If the earlier run uploaded but never
+  reached the copy-sheet (e.g. it errored at the Sheets step), re-dropping now
+  writes the missing sheet row without contacting OSCAR — so re-dropping a file
+  is the automatic way to recover a half-finished upload. The earlier
+  completion meaning (incomplete / signature-missing) is preserved.
+
+---
+
 ## [1.0.0] - 2026-06-15
 
 ### Added

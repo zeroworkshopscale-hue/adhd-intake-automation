@@ -43,7 +43,7 @@
 | Preferred-name update | Coded, not live-tested | Needs a live chart with a name mismatch |
 | Booking Alert field name | Coded, unverified | JS tries common names; confirm "Chart program status=..." in logs with a real Private patient |
 | Google Sheets cloud sync | Coded, not end-to-end tested | Needs real service account + correct spreadsheet ID |
-| Duplicate upload guard | Not implemented | Re-dropping a completed file re-uploads it (logged but not blocked) |
+| Duplicate upload guard | Done | Re-dropping an already-uploaded file skips OSCAR and recovers the missing sheet row (`pipeline/processor.py`, `tests/test_duplicate_guard.py`) |
 
 ---
 
@@ -55,7 +55,7 @@
 | Signature threshold not calibrated | Medium | `min_ink_density: 0.05` is a reasonable estimate. Run `tools/calibrate_signature.py` with real signed + unsigned forms before going live. |
 | Tesseract unconfirmed on clinic PC | Medium | Scanned/handwritten forms will not OCR until Tesseract-OCR is installed. Fillable PDFs (all current forms) are unaffected. |
 | Column A default value undefined | Low | When no private keywords are found in the Booking Alert, column A is blank. Whether it should default to "MSP" for non-private patients is undecided. |
-| Duplicate upload not blocked | Low | Re-dropping a completed PDF re-uploads it. The duplicate is logged in the audit trail but not prevented. |
+| Duplicate upload not blocked | Resolved | Re-dropping an already-uploaded file now skips the OSCAR upload and, if needed, writes the missing sheet row. |
 
 ---
 
