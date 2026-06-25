@@ -64,20 +64,30 @@ class SignatureValidator:
             # 3) Handwritten / drawn / pasted signature: ink in the signature
             #    region only (not the whole page).
             density = self._signature_region_density(page)
-            threshold = self._config.min_ink_density
-            signed = density is not None and density >= threshold
-            detail = (
-                f"signature-region ink {density:.4f} "
-                f"({'>=' if signed else '<'} threshold {threshold})"
-                if density is not None
-                else "no signature line found on the consent page"
-            )
+            if density is not None:
+                threshold = self._config.min_ink_density
+                signed = density >= threshold
+                return SignatureValidationResult(
+                    signed=bool(signed),
+                    consent_page_index=page_index,
+                    method="signature-region-ink",
+                    ink_density=density,
+                    detail=f"signature-region ink {density:.4f} "
+                           f"({'>=' if signed else '<'} threshold {threshold})",
+                )
+
+            # 4) Scanned / image-only consent page (no text layer): OCR to find
+            #    the signature label, then measure the ink beside it.
+            result = self._check_scanned_signature(page, page_index)
+            if result is not None:
+                return result
+
             return SignatureValidationResult(
-                signed=bool(signed),
+                signed=False,
                 consent_page_index=page_index,
                 method="signature-region-ink",
-                ink_density=density,
-                detail=detail,
+                ink_density=None,
+                detail="no signature line found on the consent page",
             )
 
     # ------------------------------------------------------------------
@@ -86,14 +96,22 @@ class SignatureValidator:
         page mentioning a consent keyword; else the final page."""
         sig_page = None
         kw_page = None
+        scanned_page = None
         for i in range(doc.page_count):
-            text = doc.load_page(i).get_text("text").lower()
+            page = doc.load_page(i)
+            text = page.get_text("text").lower()
             if "patient signature" in text or "signature" in text:
                 sig_page = i
             if any(kw in text for kw in self._config.consent_keywords):
                 kw_page = i
+            # An image-only page with almost no text layer is very likely a
+            # scanned consent/signature page (the label is in the image, not text).
+            if len(text.strip()) < 30 and page.get_images():
+                scanned_page = i
         if sig_page is not None:
             return sig_page
+        if scanned_page is not None:
+            return scanned_page
         if kw_page is not None:
             return kw_page
         return doc.page_count - 1
@@ -180,3 +198,66 @@ class SignatureValidator:
         density = float(np.count_nonzero(arr < 128) / arr.size)
         logger.debug("signature-region density = %.4f", density)
         return density
+
+    # --- 4) scanned / image-only consent page: OCR the label, measure ink -----
+    # Scanned cursive is thinner over a wider band than a fillable-field
+    # signature, so an empty line reads ~0 and a real signature ~0.02-0.03.
+    _SCANNED_SIG_THRESHOLD = 0.012
+
+    def _check_scanned_signature(self, page, page_index: int) -> Optional[SignatureValidationResult]:
+        """For an image-only consent page, OCR to locate the 'signature' label
+        and measure the dark-pixel fraction in the band to its right."""
+        if self._ocr is None:
+            return None
+        try:
+            import pytesseract
+            from pytesseract import Output
+        except Exception:
+            return None
+
+        zoom = 200 / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False, annots=True)
+        if pix.width == 0 or pix.height == 0:
+            return None
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        gray = np.asarray(img.convert("L"))
+        try:
+            data = pytesseract.image_to_data(img, output_type=Output.DICT)
+        except Exception:
+            logger.debug("Scanned-signature OCR failed", exc_info=True)
+            return None
+
+        sig = None
+        date = None
+        for i, word in enumerate(data["text"]):
+            wl = (word or "").strip().lower()
+            if not wl:
+                continue
+            if "signature" in wl and sig is None:
+                sig = (data["left"][i], data["top"][i], data["width"][i], data["height"][i])
+            elif wl.startswith("date") and sig is not None and date is None:
+                if abs(data["top"][i] - sig[1]) <= 25:   # same line as the label
+                    date = data["left"][i]
+        if sig is None:
+            return None
+
+        x0 = sig[0] + sig[2] + 8
+        y0 = max(0, sig[1] - 18)
+        y1 = min(gray.shape[0], sig[1] + sig[3] + 18)
+        x1 = (date - 8) if date else int(pix.width * 0.95)
+        if x1 - x0 < 30:
+            x1 = min(gray.shape[1], x0 + 200)
+        region = gray[y0:y1, max(0, x0):min(gray.shape[1], x1)]
+        if region.size == 0:
+            return None
+        density = float(np.count_nonzero(region < 128) / region.size)
+        signed = density >= self._SCANNED_SIG_THRESHOLD
+        logger.info("scanned-signature region ink = %.4f (page %d)", density, page_index + 1)
+        return SignatureValidationResult(
+            signed=signed,
+            consent_page_index=page_index,
+            method="scanned-ocr-ink",
+            ink_density=density,
+            detail=f"scanned signature-region ink {density:.4f} "
+                   f"({'>=' if signed else '<'} {self._SCANNED_SIG_THRESHOLD})",
+        )
