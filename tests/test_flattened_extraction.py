@@ -56,6 +56,18 @@ def test_referral_ink_fallback_picks_ticked_option(tmp_path):
     doc.close()
 
 
+def test_referral_label_reads_printed_text_for_generic_field_name(tmp_path):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((79, 288), "Friend", fontsize=11)
+    rect = fitz.Rect(53, 280, 74, 295)            # checkbox left of the label
+    # A meaningless field name -> read the printed label beside it.
+    assert Extractor._referral_label_for(page, rect, "Check Box10") == "Friend"
+    # A descriptive field name still passes through unchanged.
+    assert Extractor._referral_label_for(page, rect, "Family member") == "Family member"
+    doc.close()
+
+
 def _substance_row(doc, mark):
     """One substance row (Alcohol) with No/Yes; `mark` fills one of the boxes."""
     page = doc.new_page()

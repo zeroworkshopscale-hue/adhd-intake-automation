@@ -538,6 +538,35 @@ class Extractor:
             lbl = lbl[:-5]
         return lbl.strip()
 
+    # Field names that carry no meaning (must read the printed label instead).
+    _GENERIC_FIELD_RE = re.compile(r"^(check\s*box|checkbox|undefined|field|text)\s*\d*$", re.I)
+
+    @staticmethod
+    def _text_right_of(page, rect, max_chars: int = 40) -> str:
+        """The printed option label sitting to the right of a checkbox on its row
+        (e.g. 'Friend'). Stops at a '(name)' / '(e.g.' / ':' marker."""
+        cy = (rect.y0 + rect.y1) / 2.0
+        words = [
+            (wx0, wd)
+            for wx0, wy0, wx1, wy1, wd, *_ in page.get_text("words")
+            if wx0 >= rect.x1 - 2 and abs((wy0 + wy1) / 2.0 - cy) <= 6
+        ]
+        words.sort(key=lambda t: t[0])
+        label = " ".join(w for _, w in words).strip()
+        for cut in ("(name", "(e.g", "("):
+            i = label.find(cut)
+            if i > 0:
+                label = label[:i]
+        return label.strip().rstrip(":").strip()[:max_chars]
+
+    @staticmethod
+    def _referral_label_for(page, rect, name: str) -> str:
+        """Prefer the printed label beside the checkbox; fall back to the field
+        name (only useful when it is descriptive, not 'Check Box10')."""
+        if Extractor._GENERIC_FIELD_RE.match((name or "").strip()):
+            return Extractor._text_right_of(page, rect) or ""
+        return Extractor._clean_referral_label(name) or Extractor._text_right_of(page, rect)
+
     @staticmethod
     def _detect_referral_columns(page, answers: dict) -> None:
         """Up to three selected 'How did you hear about us?' options, in order,
@@ -547,15 +576,16 @@ class Extractor:
         forms fall back to comparing the ink in the mark area left of each option
         label (the ticked ones stand clearly above the empty blanks).
         """
-        sel: list[tuple[float, str]] = []
+        sel: list = []
         for w in page.widgets() or []:
             r = w.rect
             if r.x0 < 100 and 6 < (r.x1 - r.x0) < 35 and Extractor._is_marked(w.field_value):
-                sel.append((r.y0, w.field_name or ""))
+                sel.append((r.y0, r, w.field_name or ""))
 
         if sel:
-            sel.sort()
-            labels = [Extractor._clean_referral_label(n) for _, n in sel]
+            sel.sort(key=lambda t: t[0])
+            labels = [Extractor._referral_label_for(page, rect, name) for _, rect, name in sel]
+            labels = [lbl for lbl in labels if lbl]   # drop any that resolved empty
         else:
             labels = Extractor._referral_from_ink(page)
 
