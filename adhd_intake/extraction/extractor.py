@@ -483,19 +483,45 @@ class Extractor:
             yes = False
             if rects:
                 ry = rects[0].y0
-                # The Yes/No checkboxes sit on the label's row, left of mid-page.
-                row = [
-                    w for w in widgets
-                    if abs(w.rect.y0 - ry) <= 10 and w.rect.x0 < 360
-                    and (w.rect.x1 - w.rect.x0) < 40
-                ]
-                row.sort(key=lambda w: w.rect.x0)   # [No (left), Yes (right)]
-                if len(row) >= 2:
-                    yes = Extractor._is_marked(row[-1].field_value)
+                if widgets:
+                    # Fillable: the Yes/No checkboxes are widgets on the label row.
+                    row = [
+                        w for w in widgets
+                        if abs(w.rect.y0 - ry) <= 10 and w.rect.x0 < 360
+                        and (w.rect.x1 - w.rect.x0) < 40
+                    ]
+                    row.sort(key=lambda w: w.rect.x0)   # [No (left), Yes (right)]
+                    if len(row) >= 2:
+                        yes = Extractor._is_marked(row[-1].field_value)
+                else:
+                    # Flattened: compare the ink in the mark area left of Yes vs No.
+                    yes = Extractor._substance_yes_from_ink(page, ry)
             answers[key] = value if yes else ""
             if yes:
                 selected.append(value)
         answers["substance_use"] = ", ".join(selected)
+
+    @staticmethod
+    def _substance_yes_from_ink(page, row_y: float) -> bool:
+        """Flattened/scanned fallback for one substance row: 'Yes' only when the
+        mark left of 'Yes' clearly exceeds the (empty) box left of 'No'."""
+        def leftmost(word):
+            rs = sorted(
+                (r for r in page.search_for(word) if abs(r.y0 - row_y) <= 10),
+                key=lambda r: r.x0,
+            )
+            return rs[0] if rs else None
+
+        yr = leftmost("Yes")
+        if yr is None:
+            return False
+        yes_ink = Extractor._region_density(page, yr.x0 - 28, yr.y0 - 1, yr.x0 - 2, yr.y1 + 1)
+        nr = leftmost("No")
+        no_ink = (
+            Extractor._region_density(page, nr.x0 - 28, nr.y0 - 1, nr.x0 - 2, nr.y1 + 1)
+            if nr is not None else 0.0
+        )
+        return yes_ink >= 0.10 and (yes_ink - no_ink) >= 0.03
 
     # Option labels on the "How did you hear about us?" page (used for the
     # flattened-form ink fallback; fillable forms read the widgets directly).
