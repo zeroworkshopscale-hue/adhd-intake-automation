@@ -41,6 +41,23 @@ def _signature(record: ProcessingRecord) -> str:
     return "Yes" if record.signature_present else "No"
 
 
+# Canadian province/territory codes -> full names (the sheet shows the full name).
+_PROVINCE_NAMES = {
+    "AB": "Alberta", "BC": "British Columbia", "MB": "Manitoba",
+    "NB": "New Brunswick", "NL": "Newfoundland and Labrador",
+    "NS": "Nova Scotia", "NT": "Northwest Territories", "NU": "Nunavut",
+    "ON": "Ontario", "PE": "Prince Edward Island", "QC": "Quebec",
+    "SK": "Saskatchewan", "YT": "Yukon",
+}
+
+
+def _province_full(record: ProcessingRecord) -> str:
+    p = (record.demographics.province or "").strip()
+    if not p:
+        return ""
+    return _PROVINCE_NAMES.get(p.upper().replace(".", ""), p)
+
+
 # field key -> function(record) -> cell string.
 # Add new keys here to expose more data to the copy sheet.
 FIELD_RESOLVERS: dict[str, Callable[[ProcessingRecord], str]] = {
@@ -57,7 +74,7 @@ FIELD_RESOLVERS: dict[str, Callable[[ProcessingRecord], str]] = {
     "phone": lambda r: r.demographics.phone or "",
     "health_card": lambda r: r.demographics.health_card or "",
     "pronoun": lambda r: r.demographics.pronoun or "",
-    "province": lambda r: r.demographics.province or "",
+    "province": _province_full,
     "referral_source": lambda r: str(r.answers.get("referral_source", "")),
     "program_status": lambda r: r.demographics.program_status or "",
     "questionnaire_type": lambda r: r.questionnaire_type.value,
@@ -105,6 +122,9 @@ class LocalSheetWriter:
         self._path = path
         self._columns = tuple(columns) if columns else DEFAULT_COLUMNS
         self._blank_placeholder = blank_placeholder or ""
+        # Where the most recent row actually landed (main path, or fallback if
+        # the main sheet was locked). Lets callers tell the operator.
+        self.last_write_path = path
         # Validate field keys early so a config typo fails loudly at start-up.
         # A "form:<field name>" key pulls a raw questionnaire answer by name.
         for _, field_key in self._columns:
@@ -153,19 +173,40 @@ class LocalSheetWriter:
                 cells.append(value or self._placeholder_for(field_key))
         return cells
 
-    def append_record(self, record: ProcessingRecord) -> int:
-        """Append a row; write the header first if the file is new. Returns the
-        1-based data row number (excluding the header)."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        is_new = not self._path.exists() or self._path.stat().st_size == 0
+    def _fallback_path(self) -> Path:
+        """Where rows go when the main sheet is locked (open in Excel)."""
+        return self._path.with_name(self._path.stem + "_LOCKED_ROWS" + self._path.suffix)
 
-        with self._path.open("a", newline="", encoding="utf-8-sig") as fh:
+    def _write_row(self, path: Path, record: ProcessingRecord) -> int:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not path.exists() or path.stat().st_size == 0
+        with path.open("a", newline="", encoding="utf-8-sig") as fh:
             writer = csv.writer(fh)
             if is_new:
                 writer.writerow(self.headers)
             writer.writerow(self._row(record))
+        with path.open("r", encoding="utf-8-sig") as fh:
+            return sum(1 for _ in fh) - 1  # minus header
 
-        with self._path.open("r", encoding="utf-8-sig") as fh:
-            row_count = sum(1 for _ in fh) - 1  # minus header
-        logger.info("Wrote local copy-sheet row %d -> %s", row_count, self._path)
-        return row_count
+    def append_record(self, record: ProcessingRecord) -> int:
+        """Append a row; write the header first if the file is new. Returns the
+        1-based data row number.
+
+        If the main sheet is locked (typically because it is open in Excel), the
+        row is written to a sibling ``*_LOCKED_ROWS.csv`` file instead of being
+        lost, so the patient is never dropped over a file lock.
+        """
+        self.last_write_path = self._path
+        try:
+            row = self._write_row(self._path, record)
+            logger.info("Wrote local copy-sheet row %d -> %s", row, self._path)
+            return row
+        except PermissionError:
+            fb = self._fallback_path()
+            self.last_write_path = fb
+            row = self._write_row(fb, record)
+            logger.warning(
+                "Copy sheet '%s' was locked (open in Excel?) — wrote row %d to "
+                "fallback '%s' instead.", self._path, row, fb,
+            )
+            return row

@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self._worker.error_file.connect(self._on_error_file)
         self._worker.confirm_update_requested.connect(self._on_confirm_update)
         self._worker.incomplete_requested.connect(self._on_incomplete_decision)
+        self._worker.review_requested.connect(self._on_review_details)
         self._worker.select_patient_requested.connect(self._on_select_patient)
         self._worker.email_requested.connect(self._on_ask_email)
         self._worker.idle.connect(lambda: self.statusBar().showMessage("Idle"))
@@ -227,6 +228,18 @@ class MainWindow(QMainWindow):
             body_text=build_incomplete_email(first, pages_label or "some pages", questions),
         )
         dlg.exec()
+
+    def _on_review_details(self, record, used_ocr) -> None:
+        """Show the editable review dialog for a low-confidence extraction and
+        return the operator's confirmed/corrected values to the worker."""
+        from .review_dialog import DetailsReviewDialog
+
+        result = DetailsReviewDialog.ask(record, bool(used_ocr), parent=self)
+        self._log(
+            "  Details review: "
+            + ("confirmed/corrected by operator" if result else "left as auto-extracted")
+        )
+        self._worker.provide_review(result)
 
     def _on_incomplete_decision(self, record, completeness) -> None:
         """Notify the operator of the empty rows/sections and let them choose to

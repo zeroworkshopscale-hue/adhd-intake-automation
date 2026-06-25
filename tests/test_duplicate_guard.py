@@ -72,7 +72,9 @@ def test_redrop_after_failed_sheet_writes_missing_row_without_reuploading(config
     )
     first = processor1.process(sample_pdf)
 
-    assert first.status is ProcessingStatus.ERROR
+    # A failed copy-sheet write must NOT drop the patient: OSCAR already has the
+    # document, so the record stays COMPLETED, just without a sheet row.
+    assert first.status is ProcessingStatus.COMPLETED
     assert first.record.oscar_document_id is not None      # uploaded
     assert first.record.sheets_row is None                 # but not on the sheet
     assert len(oscar1.upload_calls) == 1

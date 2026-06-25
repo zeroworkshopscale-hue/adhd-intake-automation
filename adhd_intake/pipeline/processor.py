@@ -114,6 +114,12 @@ class IntakeProcessor:
         self.confirm_incomplete: Callable[[ProcessingRecord, object], bool] = (
             lambda record, completeness: False
         )
+        # Called for low-confidence extractions (handwritten/scanned, or too few
+        # identifiers) so the operator can review/correct the details. Returns a
+        # dict {"demographics": {...}, "answers": {...}} or None. Default: no-op.
+        self.review_extraction: Callable[[ProcessingRecord, bool], object] = (
+            lambda record, used_ocr: None
+        )
         # Interactive match helpers (set by the GUI worker). Headless -> None,
         # so auto-matching alone is used.
         self.select_patient = None   # (candidates: list[dict]) -> demographic_no | None
@@ -255,6 +261,30 @@ class IntakeProcessor:
         return PipelineResult(record, record.status, record.message)
 
     # ------------------------------------------------------------------
+    def _apply_review(self, record: ProcessingRecord, used_ocr: bool) -> None:
+        """Ask the operator to review/correct a low-confidence extraction and
+        apply whatever they confirm. No-op when there is no GUI callback."""
+        try:
+            result = self.review_extraction(record, used_ocr)
+        except Exception:
+            logger.exception("Details review failed; using the extracted values")
+            return
+        if not result:
+            return
+        demo_edits = result.get("demographics") or {}
+        for field, value in demo_edits.items():
+            setattr(record.demographics, field, value or None)
+        if "dob" in demo_edits:
+            # Keep the raw string in sync so DOB matching uses the corrected value.
+            record.demographics.dob_raw = demo_edits["dob"] or None
+        for key, value in (result.get("answers") or {}).items():
+            record.answers[key] = value
+        self._repo.update(record)
+        self._audit.record(
+            AuditEvent.EXTRACTED, "operator reviewed/corrected details", record_id=record.id
+        )
+
+    # ------------------------------------------------------------------
     def _run_stages(self, record: ProcessingRecord, pdf_path: Path) -> PipelineResult:
         # ---- 1. Extraction (with OCR fallback) ----
         record.status = ProcessingStatus.EXTRACTING
@@ -282,6 +312,13 @@ class IntakeProcessor:
             f"warnings={'; '.join(extraction.warnings) or 'none'}",
             record_id=record.id,
         )
+
+        # ---- 1b. Manual review for low-confidence extractions ----
+        # Handwritten/scanned forms (OCR) and forms we couldn't pull enough
+        # identifiers from are unreliable, so let the operator confirm/correct the
+        # details (pre-filled, fully editable) before we search OSCAR.
+        if extraction.used_ocr or not record.demographics.has_minimum_identifiers():
+            self._apply_review(record, extraction.used_ocr)
 
         # ---- 2. Signature / consent validation (advisory — never blocks upload) ----
         record.status = ProcessingStatus.VALIDATING
@@ -417,7 +454,8 @@ class IntakeProcessor:
         except OscarError as exc:
             return self._fail(record, f"OSCAR error: {exc}")
 
-        # ---- 5. Update Google Sheets (PHI-safe) ----
+        # ---- 5. Update Google Sheets / copy sheet (PHI-safe) ----
+        sheet_note = ""
         try:
             sheets = self._sheets_factory()
             row = sheets.append_record(record)
@@ -427,12 +465,19 @@ class IntakeProcessor:
                 AuditEvent.SHEET_UPDATED, f"row {row}", record_id=record.id
             )
         except Exception as exc:
-            # Upload succeeded but logging failed — surface as error for review,
-            # but do NOT re-upload. Operator can re-run the Sheets sync.
-            logger.exception("Sheets update failed after successful upload")
-            return self._fail(
-                record,
-                f"Uploaded to OSCAR (doc {record.oscar_document_id}) but Sheets update failed: {exc}",
+            # OSCAR already has the document — never drop the patient over a copy-
+            # sheet write (e.g. the CSV is open in Excel). Keep the record
+            # completed so it still shows in Processed Patients; the data is in the
+            # database and the row can be re-synced once the sheet is closed.
+            logger.exception("Copy-sheet update failed after successful upload")
+            self._audit.record(
+                AuditEvent.ERROR,
+                f"copy-sheet write failed (kept as completed): {exc}",
+                record_id=record.id,
+            )
+            sheet_note = (
+                " (copy sheet was unavailable — close Excel; this row is saved in "
+                "the app and can be re-synced.)"
             )
 
         # ---- 6. Done ----
@@ -449,6 +494,7 @@ class IntakeProcessor:
         else:
             record.status = ProcessingStatus.COMPLETED
             record.message = "Processed successfully."
+        record.message += sheet_note
         moved = safe_move(pdf_path, self._config.folders.processed)
         record.stored_path = str(moved)
         self._repo.update(record)

@@ -32,6 +32,7 @@ class ProcessingWorker(QObject):
     # thread blocks until the matching provide_* method is called.
     confirm_update_requested = Signal(object, object)   # (record, discrepancies)
     incomplete_requested = Signal(object, object)       # (record, CompletenessResult)
+    review_requested = Signal(object, bool)             # (record, used_ocr)
     select_patient_requested = Signal(object)           # (candidates list[dict])
     email_requested = Signal(str)                       # (patient label)
 
@@ -50,11 +51,30 @@ class ProcessingWorker(QObject):
         self._select_result = None
         self._email_event = threading.Event()
         self._email_result = None
+        self._review_event = threading.Event()
+        self._review_result = None
         # The pipeline calls these (in the worker thread) to ask the operator.
         self._processor.confirm_update = self._request_confirmation
         self._processor.confirm_incomplete = self._request_incomplete_decision
+        self._processor.review_extraction = self._request_review
         self._processor.select_patient = self._request_patient_selection
         self._processor.ask_email = self._request_email
+
+    def _request_review(self, record, used_ocr):
+        """Blocking (worker-thread) request: operator reviews/edits a
+        low-confidence extraction. Returns the edited values dict, or None."""
+        self._review_result = None
+        self._review_event.clear()
+        self.review_requested.emit(record, bool(used_ocr))
+        if not self._review_event.wait(timeout=900):
+            logger.warning("Details review timed out; using the extracted values")
+            return None
+        return self._review_result
+
+    def provide_review(self, result) -> None:
+        """Called on the GUI thread with the operator's edited values (or None)."""
+        self._review_result = result
+        self._review_event.set()
 
     def _request_confirmation(self, record, discrepancies) -> list:
         """Blocking (worker-thread) request for operator approval via the GUI.
