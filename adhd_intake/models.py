@@ -317,6 +317,9 @@ class ProcessingRecord:
     # In-memory only: specific unanswered questions when a form is incomplete,
     # so the activity log and patient email can name exactly what to complete.
     incomplete_questions: list = field(default_factory=list)
+    # In-memory only: True when this result was skipped as a duplicate of a
+    # patient already processed this session (no new upload/row).
+    skipped_duplicate: bool = False
 
     def patient_email(self) -> str:
         return self.demographics.email or ""

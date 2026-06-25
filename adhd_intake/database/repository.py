@@ -152,6 +152,31 @@ class RecordRepository:
             ).fetchone()
         return self._row_to_record(row) if row else None
 
+    def find_uploaded_by_demographic(
+        self, demographic_no, since=None, exclude_id=None
+    ) -> Optional[ProcessingRecord]:
+        """Most recent record for this patient that was uploaded to OSCAR (has a
+        document id) — optionally only since ``since`` (created_at, inclusive) and
+        excluding ``exclude_id``. Used to skip a duplicate upload/row for a patient
+        whose form arrived as a different file (so the hash guard missed it)."""
+        if not demographic_no:
+            return None
+        sql = (
+            "SELECT * FROM processing_records WHERE demographic_no=? "
+            "AND oscar_document_id IS NOT NULL AND oscar_document_id != ''"
+        )
+        params: list = [str(demographic_no)]
+        if since is not None:
+            sql += " AND created_at >= ?"
+            params.append(since.isoformat(timespec="seconds"))
+        if exclude_id is not None:
+            sql += " AND id != ?"
+            params.append(exclude_id)
+        sql += " ORDER BY id DESC LIMIT 1"
+        with self._db.lock:
+            row = self._db.connection.execute(sql, params).fetchone()
+        return self._row_to_record(row) if row else None
+
     def list_all(self, limit: int = 500) -> list[ProcessingRecord]:
         with self._db.lock:
             rows = self._db.connection.execute(

@@ -60,6 +60,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._services = services
         self._session_start = services.session_start
+        # Enable the patient-level duplicate guard for this session (skip a patient
+        # already uploaded this session, even if the form arrived as a new file).
+        services.processor.session_start = services.session_start
         self._sig_missing_only = False   # filter toggle for "Signature Missing" view
         # Batch progress counters (drive the "Processing X of N" bar).
         self._batch_total = 0
@@ -339,6 +342,8 @@ class MainWindow(QMainWindow):
         """Plain-language one-liner for the activity log."""
         name = record.patient_name() or record.source_filename
         who = f"{name} (#{record.demographic_no})" if record.demographic_no else name
+        if getattr(record, "skipped_duplicate", False):
+            return f"↺  {who} — already processed this session; skipped (no duplicate)."
         s = record.status
         if s is ProcessingStatus.COMPLETED:
             return f"✓  {who} — uploaded to OSCAR and added to your sheet."
@@ -464,6 +469,17 @@ class MainWindow(QMainWindow):
                        if r.status is ProcessingStatus.COMPLETED_NO_SIGNATURE]
         else:
             records = all_records
+        # Show each patient once (records are newest-first), so a duplicate that
+        # somehow slips through never shows the same patient twice in the table.
+        seen: set = set()
+        deduped = []
+        for r in records:
+            if r.demographic_no and r.demographic_no in seen:
+                continue
+            if r.demographic_no:
+                seen.add(r.demographic_no)
+            deduped.append(r)
+        records = deduped
         self._table.setRowCount(len(records))
         for row, rec in enumerate(records):
             values = [

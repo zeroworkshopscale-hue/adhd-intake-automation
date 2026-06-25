@@ -110,6 +110,10 @@ class IntakeProcessor:
         self.reuse_oscar_session = False
         self.oscar_session = None       # the live, logged-in session object
         self._oscar_cm = None           # its context manager (to close it later)
+        # Current session start; when set (by the GUI), a patient already uploaded
+        # THIS session is skipped to avoid duplicate documents/rows even if the
+        # form arrived as a different file. None -> patient-level guard disabled.
+        self.session_start = None
         # Called when chart values differ from the tool; returns True to apply
         # the update. Default: never update (no GUI available / headless).
         self.confirm_update: Callable[[ProcessingRecord, list], bool] = (
@@ -264,6 +268,37 @@ class IntakeProcessor:
         logger.info(
             "Duplicate of %s -> reused OSCAR document %s",
             record.source_filename, record.oscar_document_id,
+        )
+        return PipelineResult(record, record.status, record.message)
+
+    # ------------------------------------------------------------------
+    def _skip_duplicate_patient(self, record, prior, pdf_path) -> PipelineResult:
+        """This patient was already uploaded this session — reuse the existing
+        OSCAR document and skip the duplicate upload + sheet row."""
+        record.oscar_document_id = prior.oscar_document_id
+        record.demographic_no = prior.demographic_no
+        record.sheets_row = prior.sheets_row
+        record.skipped_duplicate = True
+        record.status = (
+            prior.status if prior.status.is_success else ProcessingStatus.COMPLETED
+        )
+        record.message = (
+            f"Already processed this session (OSCAR document "
+            f"{prior.oscar_document_id}) — skipped to avoid a duplicate upload and row."
+        )
+        self._audit.record(
+            AuditEvent.DUPLICATE_DETECTED,
+            f"same patient (demographic {prior.demographic_no}) already uploaded this "
+            f"session as record {prior.id}; skipped",
+            record_id=record.id,
+        )
+        moved = safe_move(pdf_path, self._config.folders.processed)
+        record.stored_path = str(moved)
+        self._repo.update(record)
+        self._audit.record(AuditEvent.COMPLETED, str(moved), record_id=record.id)
+        logger.info(
+            "Skipped duplicate patient %s (reused OSCAR document %s)",
+            record.demographic_no, record.oscar_document_id,
         )
         return PipelineResult(record, record.status, record.message)
 
@@ -446,6 +481,19 @@ class IntakeProcessor:
 
                 record.demographic_no = patient.demographic_no
                 record.status = ProcessingStatus.UPLOADING
+
+                # Patient-level duplicate guard: if THIS patient was already
+                # uploaded in this session (e.g. the same questionnaire arrived as
+                # a different file, so the file-hash guard didn't catch it), do not
+                # create a second OSCAR document or a duplicate sheet row.
+                if self.session_start is not None:
+                    prior = self._repo.find_uploaded_by_demographic(
+                        patient.demographic_no,
+                        since=self.session_start,
+                        exclude_id=record.id,
+                    )
+                    if prior is not None:
+                        return self._skip_duplicate_patient(record, prior, pdf_path)
 
                 # OSCAR is the source of truth for contact info: pull the chart's
                 # email and province for the sheet (never the form's clinic email).
