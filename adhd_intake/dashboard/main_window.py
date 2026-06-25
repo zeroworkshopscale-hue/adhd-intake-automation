@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
         # Batch progress counters (drive the "Processing X of N" bar).
         self._batch_total = 0
         self._batch_done = 0
+        self._connected_note_shown = False   # one-time "connecting to OSCAR" hint
         self.setWindowTitle("ADHD Intake Automation")
         self.resize(900, 700)
 
@@ -292,7 +293,7 @@ class MainWindow(QMainWindow):
             self._batch_done = 0
         self._batch_total += len(paths)
         for path in paths:
-            self._log(f"Queued: {path.name}")
+            self._log(f"📄  Added to queue:  {path.name}")
             self._worker.enqueue(path)
         self.statusBar().showMessage(f"Processing {len(paths)} file(s)…")
         self._update_progress()
@@ -318,7 +319,10 @@ class MainWindow(QMainWindow):
             self._progress_label.setText(label)
 
     def _on_started_file(self, filename: str) -> None:
-        self._log(f"Processing: {filename}")
+        if not self._connected_note_shown:
+            self._connected_note_shown = True
+            self._log("🔌  Connecting to OSCAR… (the first file can take a few seconds)")
+        self._log(f"⏳  Processing  {filename} …")
         self.statusBar().showMessage(f"Processing {filename}…")
         self._drop_zone.set_state("processing", f"Processing {filename}")
         self._update_progress(filename)
@@ -330,11 +334,32 @@ class MainWindow(QMainWindow):
         )
         self._refresh_patient_table()
 
+    @staticmethod
+    def _friendly_result_line(record) -> str:
+        """Plain-language one-liner for the activity log."""
+        name = record.patient_name() or record.source_filename
+        who = f"{name} (#{record.demographic_no})" if record.demographic_no else name
+        s = record.status
+        if s is ProcessingStatus.COMPLETED:
+            return f"✓  {who} — uploaded to OSCAR and added to your sheet."
+        if s is ProcessingStatus.COMPLETED_NO_SIGNATURE:
+            return (f"⚠  {who} — uploaded, but the consent signature was missing. "
+                    "A reminder email is ready to send.")
+        if s is ProcessingStatus.INCOMPLETE_PATIENT_INFORMED:
+            return (f"⚠  {who} — uploaded as incomplete. A reminder email with the "
+                    "missing questions is ready to send.")
+        if s is ProcessingStatus.PATIENT_NOT_FOUND:
+            return (f"✗  {record.source_filename} — patient not found in OSCAR. Nothing "
+                    "was uploaded; please check the name and date of birth.")
+        if s is ProcessingStatus.ERROR:
+            return f"✗  {record.source_filename} — could not finish: {record.message}"
+        return f"{who} — {record.status.value}"
+
     def _on_finished_file(self, result: PipelineResult) -> None:
         record = result.record
         self._batch_done += 1
         self._update_progress()
-        self._log(f"  -> {record.status.value}: {record.message}")
+        self._log(self._friendly_result_line(record))
         if record.status is ProcessingStatus.COMPLETED:
             self._drop_zone.set_state(
                 "success", f"{record.patient_name() or record.source_filename}  --  uploaded to OSCAR"
@@ -396,7 +421,7 @@ class MainWindow(QMainWindow):
     def _on_error_file(self, filename: str, message: str) -> None:
         self._batch_done += 1
         self._update_progress()
-        self._log(f"  -> ERROR {filename}: {message}")
+        self._log(f"✗  {filename} — error: {message}")
 
     def _show_consent_email(self, record) -> None:
         """Offer the operator a ready-to-send consent reminder email."""

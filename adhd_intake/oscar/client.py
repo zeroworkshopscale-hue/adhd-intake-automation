@@ -244,7 +244,7 @@ class OscarClient:
         page = self.page
         try:
             page.goto(login_url)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
 
             # Wait for the username field to appear (Angular renders asynchronously).
             page.wait_for_selector(self._sel.username_input, timeout=self._config.timeout_ms)
@@ -264,7 +264,7 @@ class OscarClient:
             submit_loc = page.locator(self._sel.login_submit).first
             page.wait_for_selector(self._sel.login_submit, timeout=self._config.timeout_ms)
             submit_loc.click()
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             logger.info("OSCAR login submitted")
         except self._timeout_error as exc:
             raise OscarError(f"Timed out logging into OSCAR: {exc}") from exc
@@ -428,7 +428,7 @@ class OscarClient:
         )
         try:
             page.goto(url)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
         except self._timeout_error:
             logger.warning("OSCAR search timed out for %s=%r", mode, keyword)
             return []
@@ -465,7 +465,7 @@ class OscarClient:
                 f"{self._classic_url('/demographic/demographiccontrol.jsp')}"
                 f"?demographic_no={demo}&displaymode=edit&dboperation=search_detail"
             )
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             page.wait_for_selector("input[name='last_name']", timeout=self._config.timeout_ms, state="attached")
             applied = page.evaluate(
                 """(changes) => {
@@ -497,7 +497,7 @@ class OscarClient:
                     submit.click()
             except Exception:
                 submit.click()
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             logger.info("Demographic %s update submitted; url=%s", demo, page.url)
         except self._timeout_error as exc:
             logger.warning("Demographic update timed out for %s: %s", demo, exc)
@@ -541,7 +541,7 @@ class OscarClient:
                 f"{self._classic_url('/demographic/demographiccontrol.jsp')}"
                 f"?demographic_no={demo}&displaymode=edit&dboperation=search_detail"
             )
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             page.wait_for_selector("input[name='last_name']", timeout=self._config.timeout_ms, state="attached")
             data = page.evaluate(
                 """() => {
@@ -641,7 +641,7 @@ class OscarClient:
                 f"?function=demographic&functionid={demo}"
             )
             page.goto(report_url)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             page.wait_for_selector(
                 self._sel.upload_file_input, timeout=self._config.timeout_ms, state="attached"
             )
@@ -680,7 +680,7 @@ class OscarClient:
                     submit.click()
                 except Exception:
                     logger.debug("Submit click fallback failed", exc_info=True)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             logger.info("UPLOAD submitted; post-submit url=%s", page.url)
         except self._timeout_error as exc:
             raise OscarError(f"Timed out uploading document to OSCAR: {exc}") from exc
@@ -702,7 +702,7 @@ class OscarClient:
                 f"{self._classic_url('/dms/documentReport.jsp')}"
                 f"?function=demographic&functionid={demo}"
             )
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("domcontentloaded")
             return description in page.inner_text("body")
         except Exception:
             logger.debug("Document verification step failed", exc_info=True)

@@ -26,6 +26,7 @@ reaches those stages — and so tests can substitute fakes.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, ContextManager, Optional, Protocol
@@ -103,6 +104,12 @@ class IntakeProcessor:
         self._completeness = completeness_validator
         self._oscar_factory = oscar_factory
         self._sheets_factory = sheets_factory
+        # OSCAR session reuse: when True (set by the GUI worker), ONE logged-in
+        # browser session is kept open and reused for the whole batch instead of
+        # launching the browser and logging in again for every file.
+        self.reuse_oscar_session = False
+        self.oscar_session = None       # the live, logged-in session object
+        self._oscar_cm = None           # its context manager (to close it later)
         # Called when chart values differ from the tool; returns True to apply
         # the update. Default: never update (no GUI available / headless).
         self.confirm_update: Callable[[ProcessingRecord, list], bool] = (
@@ -261,6 +268,38 @@ class IntakeProcessor:
         return PipelineResult(record, record.status, record.message)
 
     # ------------------------------------------------------------------
+    @contextmanager
+    def _oscar_session(self):
+        """Yield an OSCAR session.
+
+        Reuse mode (GUI batch): keep ONE logged-in session open and reuse it for
+        every file — the browser launch + OSCAR login happen only once. Otherwise
+        (headless / tests): open a fresh per-file session and close it.
+        """
+        if not self.reuse_oscar_session:
+            with self._oscar_factory() as oscar:
+                yield oscar
+            return
+        if self.oscar_session is None:
+            cm = self._oscar_factory()
+            oscar = cm.__enter__()      # launch browser + log in (once per batch)
+            self._oscar_cm = cm
+            self.oscar_session = oscar
+        yield self.oscar_session        # reused — left open for the next file
+
+    def close_oscar_session(self) -> None:
+        """Close the reused OSCAR session (called by the worker when it stops, or
+        after an error so the next file logs in fresh). No-op if none is open."""
+        if self._oscar_cm is not None:
+            try:
+                self._oscar_cm.__exit__(None, None, None)
+            except Exception:
+                logger.debug("Error closing reused OSCAR session", exc_info=True)
+            finally:
+                self._oscar_cm = None
+                self.oscar_session = None
+
+    # ------------------------------------------------------------------
     def _apply_review(self, record: ProcessingRecord, used_ocr: bool) -> None:
         """Ask the operator to review/correct a low-confidence extraction and
         apply whatever they confirm. No-op when there is no GUI callback."""
@@ -395,7 +434,7 @@ class IntakeProcessor:
         )
 
         try:
-            with self._oscar_factory() as oscar:
+            with self._oscar_session() as oscar:
                 try:
                     patient = oscar.find_patient(
                         record.demographics,
@@ -452,6 +491,9 @@ class IntakeProcessor:
                 if self._config.oscar.update_chart:
                     self._sync_chart(record, patient, oscar)
         except OscarError as exc:
+            # A reused session may now be in a bad state (login expired, browser
+            # gone). Drop it so the next file logs in fresh.
+            self.close_oscar_session()
             return self._fail(record, f"OSCAR error: {exc}")
 
         # ---- 5. Update Google Sheets / copy sheet (PHI-safe) ----

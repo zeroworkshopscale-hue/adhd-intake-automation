@@ -59,6 +59,10 @@ class ProcessingWorker(QObject):
         self._processor.review_extraction = self._request_review
         self._processor.select_patient = self._request_patient_selection
         self._processor.ask_email = self._request_email
+        # Reuse a single logged-in OSCAR session across the whole batch (the
+        # browser launch + login happen once, not per file). The session is
+        # created lazily on the first file and closed in run() when we stop.
+        self._processor.reuse_oscar_session = True
 
     def _request_review(self, record, used_ocr):
         """Blocking (worker-thread) request: operator reviews/edits a
@@ -146,18 +150,23 @@ class ProcessingWorker(QObject):
 
     def run(self) -> None:
         logger.info("Processing worker started")
-        while self._running:
-            item = self._queue.get()
-            if item is None:
-                break
-            try:
-                self._process_one(item)
-            except Exception as exc:  # never let the worker thread die
-                logger.exception("Worker failed on %s", item)
-                self.error_file.emit(item.name, str(exc))
-            finally:
-                if self._queue.empty():
-                    self.idle.emit()
+        try:
+            while self._running:
+                item = self._queue.get()
+                if item is None:
+                    break
+                try:
+                    self._process_one(item)
+                except Exception as exc:  # never let the worker thread die
+                    logger.exception("Worker failed on %s", item)
+                    self.error_file.emit(item.name, str(exc))
+                finally:
+                    if self._queue.empty():
+                        self.idle.emit()
+        finally:
+            # Close the reused OSCAR browser session here (the worker thread that
+            # created it) — Playwright's sync API is bound to this thread.
+            self._processor.close_oscar_session()
         logger.info("Processing worker stopped")
 
     def _process_one(self, pdf_path: Path) -> None:
