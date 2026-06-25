@@ -384,26 +384,62 @@ class Extractor:
         if pron:
             return pron
 
-        # 2) Flattened / scanned form: look for a real mark or ink to the left.
+        # 2) Flattened / scanned form. Prefer an explicit mark glyph (x/X/✓) left
+        #    of exactly one option. Otherwise COMPARE the ink in each option's
+        #    checkbox and pick the clear winner — the patient's mark adds ink well
+        #    above an empty printed box, while every box has some outline ink, so
+        #    "first box above a fixed threshold" wrongly always picked the top
+        #    option. Never guess when nothing stands out.
         words = page.get_text("words")  # (x0,y0,x1,y1,text,...)
+        token_hits: list[str] = []
+        densities: list[tuple[str, float]] = []
         for option in Extractor._PRONOUN_OPTIONS:
             rects = page.search_for(option)
             if not rects:
                 continue
             r = rects[0]
             cy = (r.y0 + r.y1) / 2
-            # A mark token (x / X / ✓ / etc.) just left of the option, same row.
-            # NOTE: only genuine mark glyphs count — a generic "short token"
-            # heuristic falsely marked any 1-2 char fragment beside an option.
-            for x0, y0, x1, y1, t, *_ in words:
-                if x1 <= r.x0 and x0 >= r.x0 - 60 and abs((y0 + y1) / 2 - cy) <= 8:
-                    s = t.strip()
-                    if s and _re.fullmatch(r"[xX✓√✔✗✘●•\*]+", s):
-                        return option
-            # Fallback: ink (a drawn mark) just left of the option.
-            if Extractor._region_has_ink(page, r.x0 - 48, r.y0 - 2, r.x0 - 3, r.y1 + 2):
-                return option
+            has_token = any(
+                x1 <= r.x0 and x0 >= r.x0 - 60 and abs((y0 + y1) / 2 - cy) <= 8
+                and _re.fullmatch(r"[xX✓√✔✗✘●•\*]+", (t or "").strip())
+                for x0, y0, x1, y1, t, *_ in words
+            )
+            if has_token:
+                token_hits.append(option)
+            densities.append(
+                (option, Extractor._region_density(page, r.x0 - 32, r.y0 - 1, r.x0 - 3, r.y1 + 1))
+            )
+        # Explicit mark glyph(s): the highest-priority marked option wins.
+        if token_hits:
+            for option in Extractor._PRONOUN_OPTIONS:
+                if option in token_hits:
+                    return option
+        # No glyph (e.g. a drawn ✓): pick the checkbox with clearly the most ink.
+        if densities:
+            densities.sort(key=lambda t: t[1], reverse=True)
+            top_opt, top_d = densities[0]
+            second = densities[1][1] if len(densities) > 1 else 0.0
+            if top_d >= 0.05 and (top_d - second) >= 0.02:
+                return top_opt
         return None
+
+    @staticmethod
+    def _region_density(page, x0, y0, x1, y1) -> float:
+        """Fraction of dark pixels in a page region (0..1)."""
+        import fitz
+        import numpy as np
+        from PIL import Image
+
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            return 0.0
+        region = fitz.Rect(max(page.rect.x0, x0), y0, x1, y1)
+        pix = page.get_pixmap(matrix=fitz.Matrix(300 / 72.0, 300 / 72.0), clip=region, alpha=False)
+        if pix.width == 0 or pix.height == 0:
+            return 0.0
+        arr = np.asarray(
+            Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+        )
+        return float(np.count_nonzero(arr < 128) / arr.size)
 
     # ------------------------------------------------------------------
     # Special multi-cell sections: substance use, how-did-you-hear, consent.
@@ -427,10 +463,8 @@ class Extractor:
                     self._detect_substances(page, answers)
                 if "how did you hear" in low and "referral_1" not in answers:
                     self._detect_referral_columns(page, answers)
-                if (
-                    ("future adhd initiatives" in low or "future research" in low)
-                    and "future_initiatives" not in answers
-                ):
+                if "future adhd initiatives" in low or "future research" in low:
+                    # Always normalise to Yes/No (an older path may have set YES).
                     self._detect_consent_checkboxes(page, answers)
 
     @staticmethod
@@ -463,26 +497,68 @@ class Extractor:
                 selected.append(value)
         answers["substance_use"] = ", ".join(selected)
 
+    # Option labels on the "How did you hear about us?" page (used for the
+    # flattened-form ink fallback; fillable forms read the widgets directly).
+    _REFERRAL_OPTION_LABELS = (
+        "Doctor", "Nurse practitioner", "Counsellor", "Coach", "Social worker",
+        "Psychiatrist", "Family member", "Friend", "Online search", "Twitter",
+        "TikTok", "Facebook", "Instagram", "LinkedIn", "CADDAC", "Brochure",
+    )
+
+    @staticmethod
+    def _clean_referral_label(name: str) -> str:
+        lbl = Extractor._REFERRAL_LABEL_CLEAN.get(name, name)
+        if lbl.lower().endswith(" name"):
+            lbl = lbl[:-5]
+        return lbl.strip()
+
     @staticmethod
     def _detect_referral_columns(page, answers: dict) -> None:
         """Up to three selected 'How did you hear about us?' options, in order,
-        one per column (referral_1/2/3)."""
+        one per column (referral_1/2/3).
+
+        Fillable forms read the option checkboxes (widgets); flattened/scanned
+        forms fall back to comparing the ink in the mark area left of each option
+        label (the ticked ones stand clearly above the empty blanks).
+        """
         sel: list[tuple[float, str]] = []
         for w in page.widgets() or []:
             r = w.rect
             if r.x0 < 100 and 6 < (r.x1 - r.x0) < 35 and Extractor._is_marked(w.field_value):
                 sel.append((r.y0, w.field_name or ""))
-        sel.sort()
-        labels: list[str] = []
-        for _, name in sel:
-            lbl = Extractor._REFERRAL_LABEL_CLEAN.get(name, name)
-            if lbl.lower().endswith(" name"):
-                lbl = lbl[:-5]
-            labels.append(lbl.strip())
+
+        if sel:
+            sel.sort()
+            labels = [Extractor._clean_referral_label(n) for _, n in sel]
+        else:
+            labels = Extractor._referral_from_ink(page)
+
         for i in range(3):
             answers[f"referral_{i + 1}"] = labels[i] if i < len(labels) else ""
         if labels:
             answers["referral_source"] = ", ".join(labels)
+
+    @staticmethod
+    def _referral_from_ink(page) -> list[str]:
+        """Flattened/scanned fallback: an option is selected when the ink in the
+        mark area left of its label is clearly above the empty-blank baseline."""
+        inks: list[tuple[float, str, float]] = []
+        for opt in Extractor._REFERRAL_OPTION_LABELS:
+            rects = page.search_for(opt)
+            if not rects:
+                continue
+            r = rects[0]
+            d = Extractor._region_density(page, r.x0 - 30, r.y0 - 1, r.x0 - 2, r.y1 + 1)
+            inks.append((r.y0, opt, d))
+        if not inks:
+            return []
+        baseline = sorted(d for _, _, d in inks)[len(inks) // 2]  # median ~ empty blank
+        marked = [
+            (y, opt) for y, opt, d in inks
+            if d >= 0.05 and (d - baseline) >= 0.03
+        ]
+        marked.sort()
+        return [opt for _, opt in marked]
 
     @staticmethod
     def _detect_consent_checkboxes(page, answers: dict) -> None:

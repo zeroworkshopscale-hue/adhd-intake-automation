@@ -330,6 +330,26 @@ class CompletenessValidator:
         return [sum(c) / len(c) for c in clusters]
 
     @staticmethod
+    def _is_section_header(text: str) -> bool:
+        """True for section headers / instructions that are NOT answerable rows,
+        so the ink path doesn't flag them as 'unanswered' on flattened forms.
+
+        Covers: lines ending in a colon (sub-instructions like 'For a period
+        lasting one week or more:'), ALL-CAPS headers ('QUESTIONS RELATED TO …'),
+        and the 'Put an X … best describes your behaviour' instruction.
+        """
+        t = text.strip()
+        if t.endswith(":"):
+            return True
+        low = t.lower()
+        if "put an x" in low or "best describes" in low or "describes your behaviour" in low:
+            return True
+        alpha = [c for c in t if c.isalpha()]
+        if len(alpha) >= 6 and sum(c.isupper() for c in alpha) / len(alpha) >= 0.8:
+            return True
+        return False
+
+    @staticmethod
     def _question_rows(page, band_left: float) -> list[tuple[float, float, str]]:
         groups: dict = defaultdict(list)
         for x0, y0, x1, y1, word, block, line, _wno in page.get_text("words"):
@@ -343,7 +363,10 @@ class CompletenessValidator:
             ly0 = min(w[1] for w in ws)
             ly1 = max(w[3] for w in ws)
             letters = sum(ch.isalpha() for ch in text)
-            if lx0 < band_left - 6 and len(text) >= 12 and letters >= 8:
+            if (
+                lx0 < band_left - 6 and len(text) >= 12 and letters >= 8
+                and not CompletenessValidator._is_section_header(text)
+            ):
                 lines.append((ly0, ly1, text))
         if not lines:
             return []
