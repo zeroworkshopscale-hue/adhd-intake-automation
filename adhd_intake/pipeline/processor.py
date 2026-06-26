@@ -649,6 +649,10 @@ class IntakeProcessor:
 
         changes = {d.oscar_field: _oscar_value(d) for d in approved}
         ok = oscar.update_demographic(patient.demographic_no, changes)
+        # Surface the REAL outcome to the GUI (the operator must know whether the
+        # chart actually changed, so they can fix it by hand if the write failed).
+        record.chart_update_ok = bool(ok)
+        record.chart_update_fields = [d.field_label for d in approved]
         self._audit.record(
             AuditEvent.PATIENT_MATCHED,
             f"chart updated ({len(approved)}/{len(discrepancies)} field(s)): {applied_summary}"

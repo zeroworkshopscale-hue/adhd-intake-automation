@@ -320,6 +320,11 @@ class ProcessingRecord:
     # In-memory only: True when this result was skipped as a duplicate of a
     # patient already processed this session (no new upload/row).
     skipped_duplicate: bool = False
+    # In-memory only: outcome of an OSCAR chart update the operator approved.
+    # ("ok"/"failed", the human field list) so the GUI can confirm or warn that
+    # the chart was (not) changed. None when no update was attempted.
+    chart_update_ok: Optional[bool] = None
+    chart_update_fields: list = field(default_factory=list)
 
     def patient_email(self) -> str:
         return self.demographics.email or ""

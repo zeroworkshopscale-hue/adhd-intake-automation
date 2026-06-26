@@ -250,6 +250,64 @@ def test_image_overlay_form_uses_ink_not_empty_widgets(tmp_path):
     assert res.incomplete_pages == []
 
 
+def _section_grid_page(page, sections: dict[str, list[bool]]) -> None:
+    """Draw response-column labels once, then one labelled section at a time:
+    {section header -> [answered flags per row]}."""
+    for label, x in _COLS.items():
+        page.insert_text((x, 80), label, fontsize=10)
+    y = 130.0
+    for header, flags in sections.items():
+        page.insert_text((54, y), header, fontsize=11)   # section header line
+        y += 22
+        for answered in flags:
+            page.insert_text((58, y), "I have a question here about it.", fontsize=10)
+            if answered:
+                page.insert_text((_COL_MARK_X["Sometimes"], y), "X", fontsize=13)
+            y += 26
+        y += 8
+
+
+def test_school_section_blank_is_not_flagged(tmp_path):
+    # School is optional (patient may not be a student). When the WHOLE School
+    # section is blank it must be treated as N/A, not flagged.
+    doc = fitz.open()
+    for idx in range(11):
+        page = doc.new_page()
+        if 5 <= idx <= 10:
+            _section_grid_page(page, {
+                "Family": [True, True, True],
+                "Work": [True, True, True],
+                "School": [False, False, False, False],   # entirely blank -> N/A
+            })
+    out = tmp_path / "school_blank.pdf"
+    doc.save(str(out))
+    doc.close()
+    res = _validator().validate(out, QuestionnaireType.ADULT_ADHD)
+    assert res.checked is True
+    assert res.complete is True
+
+
+def test_school_section_partially_filled_still_flags_gaps(tmp_path):
+    # If the patient answered SOME School questions they are a student, so the
+    # remaining blanks in that section are still flagged.
+    doc = fitz.open()
+    for idx in range(11):
+        page = doc.new_page()
+        if idx == 9:   # page 10
+            _section_grid_page(page, {
+                "Family": [True, True, True],
+                "School": [True, False, False],   # one answered -> blanks count
+            })
+        elif 5 <= idx <= 10:
+            _section_grid_page(page, {"Family": [True, True, True]})
+    out = tmp_path / "school_partial.pdf"
+    doc.save(str(out))
+    doc.close()
+    res = _validator().validate(out, QuestionnaireType.ADULT_ADHD)
+    assert res.complete is False
+    assert 10 in res.incomplete_pages
+
+
 def test_disabled_check_skips(tmp_path):
     pdf = _build_pdf(tmp_path, "d.pdf", 11, {7: [True, False, True, True, True]})
     v = CompletenessValidator(ValidationConfig(check_completeness=False))

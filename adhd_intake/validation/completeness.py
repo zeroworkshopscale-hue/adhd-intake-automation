@@ -123,6 +123,54 @@ class CompletenessValidator:
         # to the widget read, which flags every empty row as unanswered.
         return widget_result
 
+    # Optional questionnaire sub-sections: when EVERY row in the section is blank,
+    # treat the whole section as not-applicable (e.g. School for a patient who is
+    # not a student -- many adults are not in school) instead of flagging each
+    # row. A partially-answered optional section is still validated normally.
+    _OPTIONAL_SECTION_HEADERS = ("school",)
+    # Recognised sub-section headers, used only to find where a section ends.
+    _SECTION_HEADERS = (
+        "family", "work", "school", "home", "social", "relationships",
+    )
+
+    @staticmethod
+    def _section_header_lines(page) -> list[tuple[float, str]]:
+        """(y0, lowercased exact line text) for every text line on the page, used
+        to locate single-word section headers like 'School' or 'Work'."""
+        groups: dict = defaultdict(list)
+        for x0, y0, x1, y1, word, block, line, _wno in page.get_text("words"):
+            groups[(block, line)].append((x0, y0, word))
+        out: list[tuple[float, str]] = []
+        for ws in groups.values():
+            ws.sort(key=lambda r: r[0])
+            text = " ".join(w[2] for w in ws).strip().lower()
+            out.append((min(w[1] for w in ws), text))
+        return out
+
+    @classmethod
+    def _optional_blank_rows(cls, page, row_geoms, answered) -> set[int]:
+        """Indices of question rows inside an OPTIONAL section that has no answered
+        rows at all -> exempt from the unanswered list (treat as not-applicable).
+
+        row_geoms: [(y0, y1)] per row; answered: [bool] per row, same order.
+        """
+        lines = cls._section_header_lines(page)
+        section_ys = sorted(y for y, t in lines if t in cls._SECTION_HEADERS)
+        exempt: set[int] = set()
+        for y, t in lines:
+            if t not in cls._OPTIONAL_SECTION_HEADERS:
+                continue
+            below = [sy for sy in section_ys if sy > y + 1]
+            end = min(below) if below else float("inf")
+            idxs = [i for i, (ry0, _ry1) in enumerate(row_geoms) if y - 2 <= ry0 < end]
+            if idxs and not any(answered[i] for i in idxs):
+                exempt.update(idxs)
+                logger.info(
+                    "Completeness: optional section '%s' entirely blank -> "
+                    "treating as not-applicable (%d row(s))", t, len(idxs),
+                )
+        return exempt
+
     @staticmethod
     def _row_label(page, y0: float, y1: float, x_max: float) -> str:
         """Read the question text (left of the response band) for a row, e.g.
@@ -171,23 +219,34 @@ class CompletenessValidator:
             else:
                 rows.append([c])
 
-        unanswered: list[str] = []
-        real_rows = 0
+        geom: list[tuple[float, float]] = []
+        row_answered: list[bool] = []
+        row_label: list[str] = []
         any_filled = False
         for row in rows:
             if len(row) < 2:
                 continue
-            real_rows += 1
-            if any(filled for _, _, _, filled in row):
-                any_filled = True
-                continue
             ry0 = min(c[0] for c in row)
             ry1 = max(c[1] for c in row)
-            label = self._row_label(page, ry0, ry1, x_min) or f"question row at y={int(ry0)}"
-            unanswered.append(label)
-            logger.debug("unanswered widget row y=%.0f (%d cols): %s", ry0, len(row), label)
+            filled = any(f for _, _, _, f in row)
+            if filled:
+                any_filled = True
+                label = ""
+            else:
+                label = self._row_label(page, ry0, ry1, x_min) or f"question row at y={int(ry0)}"
+                logger.debug("unanswered widget row y=%.0f (%d cols): %s", ry0, len(row), label)
+            geom.append((ry0, ry1))
+            row_answered.append(filled)
+            row_label.append(label)
+        real_rows = len(geom)
         if real_rows == 0:
             return None, False
+        # Exempt a wholly-blank OPTIONAL section (e.g. School) from the flags.
+        exempt = self._optional_blank_rows(page, geom, row_answered)
+        unanswered = [
+            row_label[i] for i in range(real_rows)
+            if not row_answered[i] and i not in exempt
+        ]
         if not any_filled:
             # No widget on the page carries a value: either a genuinely blank
             # fillable template, or an image-overlay form whose marks live in a
@@ -292,7 +351,7 @@ class CompletenessValidator:
             page_no, n_rows, n_cols, baseline, min_ink, page_factor, margin,
         )
 
-        unanswered: list[str] = []
+        answered = [False] * n_rows
         for ri in range(n_rows):
             row_ink = ink[ri]
 
@@ -307,6 +366,7 @@ class CompletenessValidator:
             )
 
             if marked.any():
+                answered[ri] = True
                 continue
 
             # Row-wide fallback: any ink in the whole response band strip?
@@ -320,14 +380,23 @@ class CompletenessValidator:
                     page_no, ri, row_density, row_wide_threshold,
                 )
                 if row_density >= row_wide_threshold:
+                    answered[ri] = True
                     continue
 
+        # Exempt a wholly-blank OPTIONAL section (e.g. School) before flagging.
+        exempt = self._optional_blank_rows(
+            page, [(rows[i][0], rows[i][1]) for i in range(n_rows)], answered
+        )
+        unanswered: list[str] = []
+        for ri in range(n_rows):
+            if answered[ri] or ri in exempt:
+                continue
             label = (rows[ri][2] or "").strip()[:120] or f"question row at y={int(rows[ri][0])}"
             unanswered.append(label)
             logger.info(
                 "  UNANSWERED: page %d row %d y=%.0f (%s) ink=%s",
                 page_no, ri, rows[ri][0], label,
-                "[" + " ".join(f"{v:.4f}" for v in row_ink) + "]",
+                "[" + " ".join(f"{v:.4f}" for v in ink[ri]) + "]",
             )
         return unanswered, n_rows
 

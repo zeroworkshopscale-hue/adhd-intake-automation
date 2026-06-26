@@ -68,6 +68,42 @@ def test_referral_label_reads_printed_text_for_generic_field_name(tmp_path):
     doc.close()
 
 
+def test_referral_widget_ignores_consent_checkbox_below_section(tmp_path):
+    # Fillable form: 'How did you hear about us?' options sit above a consent
+    # block on the SAME page. A ticked consent checkbox must NOT be read as a
+    # referral option (it used to leak 'I consent for the Adult ADHD Centre...'
+    # into the referral columns).
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((176, 96), "How did you hear about us?", fontsize=12)
+    page.insert_text((79, 174), "Doctor", fontsize=11)
+    page.insert_text((79, 288), "Friend", fontsize=11)
+    page.insert_text((81, 509), "I consent for the Adult ADHD Centre to use my data.", fontsize=11)
+
+    def box(name, x, y, checked):
+        w = fitz.Widget()
+        w.field_name = name
+        w.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+        w.rect = fitz.Rect(x, y - 9, x + 14, y + 3)
+        w.field_value = "Yes" if checked else "Off"
+        page.add_widget(w)
+
+    box("Check Box1", 55, 288, True)    # Friend ticked (a real referral option)
+    box("Check Box9", 55, 509, True)    # consent ticked (must be ignored)
+
+    out = tmp_path / "referral_consent.pdf"
+    doc.save(str(out))
+    doc.close()
+
+    with fitz.open(str(out)) as d:
+        answers: dict = {}
+        Extractor._detect_referral_columns(d[0], answers)
+    assert answers["referral_1"] == "Friend"
+    assert answers["referral_2"] == ""
+    assert answers["referral_3"] == ""
+    assert "consent" not in (answers.get("referral_source", "").lower())
+
+
 def _substance_row(doc, mark):
     """One substance row (Alcohol) with No/Yes; `mark` fills one of the boxes."""
     page = doc.new_page()

@@ -279,8 +279,9 @@ class MainWindow(QMainWindow):
         if approved:
             fields = ", ".join(d.field_label for d in approved)
             self._log(
-                f"  Chart mismatch for {record.patient_name()}: updating "
-                f"{len(approved)} of {len(discrepancies)} field(s) in OSCAR — {fields}"
+                f"  Chart mismatch for {record.patient_name()}: applying "
+                f"{len(approved)} of {len(discrepancies)} field(s) to OSCAR — {fields} "
+                "(confirming the chart actually changed…)"
             )
         else:
             self._log(
@@ -365,6 +366,17 @@ class MainWindow(QMainWindow):
         self._batch_done += 1
         self._update_progress()
         self._log(self._friendly_result_line(record))
+        # If the operator approved an OSCAR chart update, confirm whether it
+        # actually persisted — a silent failure means they must fix it by hand.
+        if record.chart_update_ok is not None:
+            fields = ", ".join(record.chart_update_fields) or "the requested field(s)"
+            if record.chart_update_ok:
+                self._log(f"  ✓  OSCAR chart updated for {record.patient_name()} — {fields}.")
+            else:
+                self._log(
+                    f"  ✗  OSCAR chart NOT updated for {record.patient_name()} — the change "
+                    f"did not save. Please update {fields} manually in OSCAR."
+                )
         if record.status is ProcessingStatus.COMPLETED:
             self._drop_zone.set_state(
                 "success", f"{record.patient_name() or record.source_filename}  --  uploaded to OSCAR"

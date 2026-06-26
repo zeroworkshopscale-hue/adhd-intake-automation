@@ -571,6 +571,28 @@ class Extractor:
             return Extractor._text_right_of(page, rect) or ""
         return Extractor._clean_referral_label(name) or Extractor._text_right_of(page, rect)
 
+    # Markers that begin the CONSENT block printed below the referral options on
+    # the same page -- the referral scan must stop here so a ticked consent box is
+    # never read as a "how did you hear" option (it would otherwise land in the
+    # referral columns as "I consent for the Adult ADHD Centre to ...").
+    _REFERRAL_STOP_MARKERS = (
+        "I consent", "I agree", "future ADHD initiatives", "future research",
+        "Signature", "consent",
+    )
+
+    @staticmethod
+    def _referral_section_bounds(page) -> tuple[float, float]:
+        """Vertical band of the 'How did you hear about us?' section: from just
+        below its heading down to the start of the consent block (or page end)."""
+        hdr = page.search_for("How did you hear")
+        top = hdr[0].y1 if hdr else 0.0
+        bottom = page.rect.height
+        for marker in Extractor._REFERRAL_STOP_MARKERS:
+            for r in page.search_for(marker):
+                if r.y0 > top + 1:
+                    bottom = min(bottom, r.y0)
+        return top, bottom
+
     @staticmethod
     def _detect_referral_columns(page, answers: dict) -> None:
         """Up to three selected 'How did you hear about us?' options, in order,
@@ -579,11 +601,15 @@ class Extractor:
         Fillable forms read the option checkboxes (widgets); flattened/scanned
         forms fall back to comparing the ink in the mark area left of each option
         label (the ticked ones stand clearly above the empty blanks).
+        Both paths are confined to the referral section so the consent checkboxes
+        below it are never mistaken for referral options.
         """
+        top, bottom = Extractor._referral_section_bounds(page)
         sel: list = []
         for w in page.widgets() or []:
             r = w.rect
-            if r.x0 < 100 and 6 < (r.x1 - r.x0) < 35 and Extractor._is_marked(w.field_value):
+            if (top <= r.y0 < bottom and r.x0 < 100 and 6 < (r.x1 - r.x0) < 35
+                    and Extractor._is_marked(w.field_value)):
                 sel.append((r.y0, r, w.field_name or ""))
 
         if sel:
@@ -591,7 +617,7 @@ class Extractor:
             labels = [Extractor._referral_label_for(page, rect, name) for _, rect, name in sel]
             labels = [lbl for lbl in labels if lbl]   # drop any that resolved empty
         else:
-            labels = Extractor._referral_from_ink(page)
+            labels = Extractor._referral_from_ink(page, top, bottom)
 
         for i in range(3):
             answers[f"referral_{i + 1}"] = labels[i] if i < len(labels) else ""
@@ -599,15 +625,18 @@ class Extractor:
             answers["referral_source"] = ", ".join(labels)
 
     @staticmethod
-    def _referral_from_ink(page) -> list[str]:
+    def _referral_from_ink(page, top: float = 0.0, bottom: float = float("inf")) -> list[str]:
         """Flattened/scanned fallback: an option is selected when the ink in the
-        mark area left of its label is clearly above the empty-blank baseline."""
+        mark area left of its label is clearly above the empty-blank baseline.
+        Only labels within [top, bottom] (the referral section) are considered."""
         inks: list[tuple[float, str, float]] = []
         for opt in Extractor._REFERRAL_OPTION_LABELS:
             rects = page.search_for(opt)
             if not rects:
                 continue
             r = rects[0]
+            if not (top <= r.y0 < bottom):
+                continue
             d = Extractor._region_density(page, r.x0 - 30, r.y0 - 1, r.x0 - 2, r.y1 + 1)
             inks.append((r.y0, opt, d))
         if not inks:
