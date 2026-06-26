@@ -642,7 +642,12 @@ class IntakeProcessor:
         applied_summary = "; ".join(
             f"{d.field_label}: '{d.oscar_value}' -> '{d.tool_value}'" for d in approved
         )
-        changes = {d.oscar_field: d.tool_value for d in approved}
+        def _oscar_value(d: Discrepancy) -> str:
+            if d.oscar_field == "pronoun":
+                return self._PRONOUN_NORM.get(d.tool_value.strip().lower(), d.tool_value)
+            return d.tool_value
+
+        changes = {d.oscar_field: _oscar_value(d) for d in approved}
         ok = oscar.update_demographic(patient.demographic_no, changes)
         self._audit.record(
             AuditEvent.PATIENT_MATCHED,
@@ -651,8 +656,19 @@ class IntakeProcessor:
             record_id=record.id,
         )
 
-    @staticmethod
-    def _detect_discrepancies(tool: Demographics, chart: dict) -> list[Discrepancy]:
+    # Form labels → OSCAR-canonical pronoun values.
+    # "He/His" on the form is stored as "He/Him" in OSCAR — treat as equivalent.
+    _PRONOUN_NORM: dict[str, str] = {
+        "he/his":   "he/him",
+        "she/hers": "she/her",
+    }
+
+    @classmethod
+    def _normalise_pronoun(cls, value: str) -> str:
+        return cls._PRONOUN_NORM.get(value.strip().lower(), value.strip().lower())
+
+    @classmethod
+    def _detect_discrepancies(cls, tool: Demographics, chart: dict) -> list[Discrepancy]:
         """Compare tool vs chart for first/last/preferred name and address."""
         def diff(label, field, tool_val, oscar_val, require_tool=True):
             t = (tool_val or "").strip()
@@ -663,6 +679,15 @@ class IntakeProcessor:
                 return Discrepancy(label, field, t, o)
             return None
 
+        def diff_pronoun(tool_val, oscar_val):
+            t = (tool_val or "").strip()
+            o = (oscar_val or "").strip()
+            if not t:
+                return None
+            if cls._normalise_pronoun(t) != cls._normalise_pronoun(o):
+                return Discrepancy("Pronoun", "pronoun", t, o)
+            return None
+
         out: list[Discrepancy] = []
         # Address is intentionally NOT compared/updated: OSCAR is the source of
         # truth for the patient's address (the form often carries the clinic
@@ -671,7 +696,7 @@ class IntakeProcessor:
             diff("First Name", "first_name", tool.first_name, chart.get("first")),
             diff("Last Name", "last_name", tool.last_name, chart.get("last")),
             diff("Preferred Name", "pref_name", tool.pref_name, chart.get("pref")),
-            diff("Pronoun", "pronoun", tool.pronoun, chart.get("pronoun"), require_tool=True),
+            diff_pronoun(tool.pronoun, chart.get("pronoun")),
         ):
             if d is not None:
                 out.append(d)
