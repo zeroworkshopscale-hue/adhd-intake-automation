@@ -97,3 +97,41 @@ def test_substance_ink_no_when_no_is_marked(tmp_path):
     ry = page.search_for("Alcohol")[0].y0
     assert Extractor._substance_yes_from_ink(page, ry) is False
     doc.close()
+
+
+def test_substance_image_overlay_uses_ink_not_empty_widgets(tmp_path):
+    # Image-overlay form (e.g. Holmes, Arwyn): the patient's mark is in the page
+    # image but the leftover AcroForm widgets are all empty. The old code saw
+    # widgets on the page and read them as 'No' for every substance, never trying
+    # ink; it must now fall back to ink and detect the ticked one.
+    doc = fitz.open()
+    page = doc.new_page()
+    rows = {"Alcohol": 120, "Cannabis": 160, "Other substances": 200}
+    for label, y in rows.items():
+        page.insert_text((50, y), label, fontsize=11)
+        page.insert_text((272, y), "No", fontsize=11)
+        page.insert_text((344, y), "Yes", fontsize=11)
+        page.draw_rect(fitz.Rect(244, y - 9, 264, y + 3), color=(0, 0, 0), width=0.6)  # No
+        page.draw_rect(fitz.Rect(316, y - 9, 336, y + 3), color=(0, 0, 0), width=0.6)  # Yes
+        # Vestigial EMPTY text widgets sitting on the Yes/No boxes.
+        for bx in (244.0, 316.0):
+            w = fitz.Widget()
+            w.field_name = f"{label}_{int(bx)}"
+            w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+            w.rect = fitz.Rect(bx, y - 9, bx + 20, y + 3)
+            w.field_value = ""
+            page.add_widget(w)
+    # Tick ONLY Cannabis 'Yes' with ink (as the flattened image would carry it).
+    cy = rows["Cannabis"]
+    page.draw_rect(fitz.Rect(318, cy - 7, 334, cy + 1), color=(0, 0, 0), fill=(0, 0, 0))
+
+    out = tmp_path / "overlay_substance.pdf"
+    doc.save(str(out))
+    doc.close()
+
+    with fitz.open(str(out)) as d:
+        answers: dict = {}
+        Extractor._detect_substances(d[0], answers)
+    assert answers["substance_cannabis"] == "Cannabis"
+    assert answers["substance_alcohol"] == ""
+    assert answers["substance_other"] == ""

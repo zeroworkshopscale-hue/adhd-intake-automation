@@ -219,6 +219,37 @@ def test_fillable_blank_form_flags_all_pages(tmp_path):
     assert res.incomplete_pages == [6, 7, 8, 9, 10, 11]
 
 
+def test_image_overlay_form_uses_ink_not_empty_widgets(tmp_path):
+    # Real-world flattened / image-overlay form (e.g. Holmes, Arwyn): the answers
+    # are visible on the page (marks drawn in the page image) but the leftover
+    # AcroForm widgets are ALL EMPTY. The old code trusted the empty widgets and
+    # wrongly flagged every row on every page blank; it must now defer to ink and
+    # see the real marks.
+    doc = fitz.open()
+    for idx in range(11):
+        page = doc.new_page()
+        if not (5 <= idx <= 10):
+            continue
+        _grid_page(page, [True] * len(_QUESTIONS))   # visible marks + col labels
+        y = 150.0
+        for ri in range(len(_QUESTIONS)):             # vestigial empty widgets
+            for ci, x in enumerate(_WIDGET_COLS):
+                w = fitz.Widget()
+                w.field_name = f"p{idx}_r{ri}_c{ci}"
+                w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+                w.rect = fitz.Rect(x, y, x + 14, y + 12)
+                w.field_value = ""                    # all empty -> image overlay
+                page.add_widget(w)
+            y += 26
+    out = tmp_path / "overlay.pdf"
+    doc.save(str(out))
+    doc.close()
+    res = _validator().validate(out, QuestionnaireType.ADULT_ADHD)
+    assert res.checked is True
+    assert res.complete is True
+    assert res.incomplete_pages == []
+
+
 def test_disabled_check_skips(tmp_path):
     pdf = _build_pdf(tmp_path, "d.pdf", 11, {7: [True, False, True, True, True]})
     v = CompletenessValidator(ValidationConfig(check_completeness=False))

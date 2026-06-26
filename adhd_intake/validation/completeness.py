@@ -109,10 +109,19 @@ class CompletenessValidator:
     def _check_page(self, page, template, page_no: int = 0) -> Optional[tuple[list[str], int]]:
         """Return (unanswered question labels, total question rows), or None if
         no grid is found on the page."""
-        result = self._check_page_widgets(page)
-        if result is not None:
-            return result
-        return self._check_page_ink(page, template, page_no)
+        widget_result, any_filled = self._check_page_widgets(page)
+        # Trust the AcroForm only when it actually carries answers. If the page
+        # has widgets but NONE are filled, the form may be image-overlay (the
+        # patient's marks are in a flattened page image over leftover empty
+        # widgets) -- so let ink detection look first.
+        if widget_result is not None and any_filled:
+            return widget_result
+        ink_result = self._check_page_ink(page, template, page_no)
+        if ink_result is not None:
+            return ink_result
+        # Ink found no marks (e.g. a genuinely blank fillable template): fall back
+        # to the widget read, which flags every empty row as unanswered.
+        return widget_result
 
     @staticmethod
     def _row_label(page, y0: float, y1: float, x_max: float) -> str:
@@ -132,12 +141,17 @@ class CompletenessValidator:
         return " ".join(w for _, w in near).strip()[:120]
 
     # --- 1) authoritative: AcroForm field values ----------------------
-    def _check_page_widgets(self, page) -> Optional[tuple[list[str], int]]:
+    def _check_page_widgets(self, page) -> tuple[Optional[tuple[list[str], int]], bool]:
+        """Return ((unanswered labels, total rows) | None, any_widget_filled).
+
+        ``any_widget_filled`` lets the caller decide whether to trust this read
+        or defer to ink detection (image-overlay forms leave every widget empty).
+        """
         import fitz
 
         widgets = list(page.widgets() or [])
         if not widgets:
-            return None
+            return None, False
 
         x_min = page.rect.width * 0.42
         cells: list[tuple[float, float, float, bool]] = []
@@ -147,7 +161,7 @@ class CompletenessValidator:
                 continue
             cells.append((r.y0, r.y1, r.x0, self._widget_filled(w)))
         if len(cells) < 4:
-            return None
+            return None, False
 
         cells.sort(key=lambda c: c[0])
         rows: list[list[tuple[float, float, float, bool]]] = [[cells[0]]]
@@ -159,19 +173,32 @@ class CompletenessValidator:
 
         unanswered: list[str] = []
         real_rows = 0
+        any_filled = False
         for row in rows:
             if len(row) < 2:
                 continue
             real_rows += 1
-            if not any(filled for _, _, _, filled in row):
-                ry0 = min(c[0] for c in row)
-                ry1 = max(c[1] for c in row)
-                label = self._row_label(page, ry0, ry1, x_min) or f"question row at y={int(ry0)}"
-                unanswered.append(label)
-                logger.debug("unanswered widget row y=%.0f (%d cols): %s", ry0, len(row), label)
+            if any(filled for _, _, _, filled in row):
+                any_filled = True
+                continue
+            ry0 = min(c[0] for c in row)
+            ry1 = max(c[1] for c in row)
+            label = self._row_label(page, ry0, ry1, x_min) or f"question row at y={int(ry0)}"
+            unanswered.append(label)
+            logger.debug("unanswered widget row y=%.0f (%d cols): %s", ry0, len(row), label)
         if real_rows == 0:
-            return None
-        return unanswered, real_rows
+            return None, False
+        if not any_filled:
+            # No widget on the page carries a value: either a genuinely blank
+            # fillable template, or an image-overlay form whose marks live in a
+            # flattened page image over vestigial empty widgets. The caller tries
+            # ink first (which catches the overlay marks) and only falls back to
+            # this all-unanswered read when ink finds nothing.
+            logger.info(
+                "Completeness: %d widget rows, none filled; caller will try ink "
+                "first (image-overlay/flattened form?)", real_rows,
+            )
+        return (unanswered, real_rows), any_filled
 
     @staticmethod
     def _widget_filled(w) -> bool:

@@ -483,18 +483,22 @@ class Extractor:
             yes = False
             if rects:
                 ry = rects[0].y0
-                if widgets:
-                    # Fillable: the Yes/No checkboxes are widgets on the label row.
-                    row = [
-                        w for w in widgets
-                        if abs(w.rect.y0 - ry) <= 10 and w.rect.x0 < 360
-                        and (w.rect.x1 - w.rect.x0) < 40
-                    ]
-                    row.sort(key=lambda w: w.rect.x0)   # [No (left), Yes (right)]
-                    if len(row) >= 2:
-                        yes = Extractor._is_marked(row[-1].field_value)
+                # Fillable: the Yes/No checkboxes are widgets on the label row.
+                row = [
+                    w for w in widgets
+                    if abs(w.rect.y0 - ry) <= 10 and w.rect.x0 < 360
+                    and (w.rect.x1 - w.rect.x0) < 40
+                ]
+                row.sort(key=lambda w: w.rect.x0)   # [No (left), Yes (right)]
+                # Trust the widgets ONLY when this row carries a real answer
+                # (one of the Yes/No boxes is actually checked). On image-overlay
+                # forms the patient's mark is in a flattened page image and the
+                # leftover widgets are all empty, which would wrongly read 'No'
+                # for everything -- so fall back to measuring ink in that case.
+                if len(row) >= 2 and any(Extractor._is_marked(w.field_value) for w in row):
+                    yes = Extractor._is_marked(row[-1].field_value)
                 else:
-                    # Flattened: compare the ink in the mark area left of Yes vs No.
+                    # Flattened / image-overlay: compare ink left of Yes vs No.
                     yes = Extractor._substance_yes_from_ink(page, ry)
             answers[key] = value if yes else ""
             if yes:
