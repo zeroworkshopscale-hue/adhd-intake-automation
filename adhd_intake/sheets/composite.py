@@ -27,6 +27,7 @@ class CompositeSheetWriter:
                 config.local_path,
                 columns=config.columns or None,
                 blank_placeholder=config.blank_placeholder,
+                force_text=config.force_text,
             )
             if config.local_enabled
             else None

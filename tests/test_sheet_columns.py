@@ -70,3 +70,34 @@ def test_partial_referral_fills_used_slots_only():
     row = _row(rec)
     assert row["Hear1"] == "Google"
     assert row["Hear2"] == "" and row["Hear3"] == ""   # not NA
+
+
+def _row_force_text(record, placeholder="NA"):
+    from pathlib import Path
+    w = LocalSheetWriter(Path("x.csv"), columns=_COLUMNS,
+                         blank_placeholder=placeholder, force_text=True)
+    return dict(zip([h for h, _ in _COLUMNS], w._row(record)))
+
+
+def test_force_text_wraps_values_for_left_alignment():
+    # Every non-empty value becomes ="value" so Excel/Sheets left-align it;
+    # empty option/spacer cells stay genuinely empty (no ="").
+    rec = ProcessingRecord(
+        demographics=Demographics(pronoun="He/His", program_status="Private"),
+        answers={"substance_alcohol": "Alcohol", "referral_1": "Google",
+                 "referral_2": "", "future_research": "No"},
+    )
+    row = _row_force_text(rec)
+    assert row["Program"] == '="Private"'
+    assert row["Pronoun"] == '="He/His"'
+    assert row["Alcohol"] == '="Alcohol"'
+    assert row["Hear1"] == '="Google"'
+    assert row["Research"] == '="No"'
+    assert row["Cannabis"] == '="NA"'        # placeholder is also wrapped
+    assert row["Spacer"] == ""               # spacer stays empty (not ="")
+    assert row["Hear2"] == "" and row["Hear3"] == ""   # unused slots stay empty
+
+
+def test_force_text_off_by_default_leaves_raw_values():
+    rec = ProcessingRecord(demographics=Demographics(program_status="Private"), answers={})
+    assert _row(rec)["Program"] == "Private"   # no ="..." when force_text is off

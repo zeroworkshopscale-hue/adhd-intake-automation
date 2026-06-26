@@ -139,6 +139,11 @@ class SheetsConfig:
     # string keeps cells blank. Pure spacer columns (field: blank) and the
     # how-did-you-hear option slots are never filled.
     blank_placeholder: str = ""
+    # Force every local-CSV value to be text so it left-aligns (numbers, dates
+    # and ages stop right-aligning), matching the master sheet's formatting. The
+    # value is written as an ="..." cell, which Excel and Google Sheets both show
+    # as left-aligned text with no visible marker.
+    force_text: bool = False
     service_account_file: Optional[Path] = None
     spreadsheet_id: str = ""
     worksheet_name: str = "Intake Log"
@@ -269,6 +274,7 @@ class AppConfig:
                 reset_each_session=bool(sheets_raw.get("reset_each_session", True)),
                 columns=columns,
                 blank_placeholder=str(sheets_raw.get("blank_placeholder", "")),
+                force_text=bool(sheets_raw.get("force_text", False)),
                 service_account_file=_resolve(sa_file) if sa_file else None,
                 spreadsheet_id=sheets_raw.get("spreadsheet_id", ""),
                 worksheet_name=sheets_raw.get("worksheet_name", "Intake Log"),

@@ -118,10 +118,12 @@ class LocalSheetWriter:
         path: Path,
         columns: Sequence[tuple[str, str]] | None = None,
         blank_placeholder: str = "",
+        force_text: bool = False,
     ):
         self._path = path
         self._columns = tuple(columns) if columns else DEFAULT_COLUMNS
         self._blank_placeholder = blank_placeholder or ""
+        self._force_text = bool(force_text)
         # Where the most recent row actually landed (main path, or fallback if
         # the main sheet was locked). Lets callers tell the operator.
         self.last_write_path = path
@@ -154,6 +156,14 @@ class LocalSheetWriter:
             return ""
         return self._blank_placeholder
 
+    def _as_text(self, value: str) -> str:
+        """Wrap a non-empty value as an ="..." cell so Excel and Google Sheets
+        treat it as text and LEFT-ALIGN it (numbers/dates stop right-aligning),
+        matching the master sheet. Empty cells are left empty."""
+        if not self._force_text or value == "":
+            return value
+        return '="' + value.replace('"', '""') + '"'
+
     def _row(self, record: ProcessingRecord) -> list[str]:
         cells: list[str] = []
         for _, field_key in self._columns:
@@ -167,10 +177,10 @@ class LocalSheetWriter:
                     if v:
                         value = v
                         break
-                cells.append(value or self._placeholder_for(field_key))
+                cells.append(self._as_text(value or self._placeholder_for(field_key)))
             else:
                 value = FIELD_RESOLVERS[field_key](record)
-                cells.append(value or self._placeholder_for(field_key))
+                cells.append(self._as_text(value or self._placeholder_for(field_key)))
         return cells
 
     def _fallback_path(self) -> Path:

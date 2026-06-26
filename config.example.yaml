@@ -95,6 +95,12 @@ sheets:
   # columns). Set to "" to leave blanks empty.
   blank_placeholder: "NA"
 
+  # Force every value to be left-aligned text (numbers/dates stop right-aligning)
+  # so the copy sheet matches the master sheet's formatting when pasted. The cell
+  # is written as ="value", which Excel and Google Sheets show as left-aligned
+  # text with no visible marker. Set false to keep raw values.
+  force_text: true
+
   # Column order must match your master Google Sheet so rows paste in aligned.
   # field options: blank, date, datetime, demographic_no, email, first_name,
   #   last_name, full_name, dob, age, phone, health_card, pronoun,
